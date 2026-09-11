@@ -69,6 +69,20 @@ JSON objekt odpovidajici tomu schematu.
 
 """
 
+# Instrukce na UPLNY KONEC promptu. Model ji vidi jako posledni vec pred
+# odpovedi, takze ma nejvetsi vahu. Resi konkretni selhani: DeepSeek si po
+# tool callu domysli jeho vysledek a cely dalsi tah (viz _ECHO vysvetleni).
+TURN_TRAILER = """\
+[INSTRUKCE PRO TENTO TAH]
+Odpovidas jako posledni "assistant" v konverzaci. Rozhodni se:
+  A) Potrebujes nastroj  -> posli POUZE tool call. Nic dalsiho.
+  B) Mas vse potrebne    -> napis finalni odpoved. Zadny tool call.
+
+NIKDY sam nevypisuj vysledek nastroje ani dalsi tah. Znacky
+[VYSLEDEK NASTROJE ...], [ASSISTANT], [USER], [SYSTEM] pise VYHRADNE system.
+Kdyz je opises, rozbijes konverzaci.
+Po tool callu okamzite skonci — vysledek dostanes v dalsi zprave."""
+
 
 def render_tool(tool: dict) -> str:
     fn = tool.get("function") or tool
@@ -135,6 +149,12 @@ def build_prompt(messages: list[dict], tools: list[dict] | None = None) -> str:
         else:
             # pi posila obsah jako list casti
             parts.append(f"[USER]\n{content}")
+
+    # Zaverecna instrukce PATRI NA KONEC — tam ji model nejspis poslechne.
+    # Bez ni model casto "pokracuje v prepisu": domysli si vysledek nastroje
+    # a dalsi tah (v realne session 483x), cimz si otravi vlastni historii.
+    if tools:
+        parts.append(TURN_TRAILER)
     return "\n\n".join(parts)
 
 
@@ -240,6 +260,22 @@ _DSML_MARKER = re.compile(r"[\uff5c|]+\s*DSML\s*[\uff5c|]+", re.I)
 _DSML_TAG = re.compile(
     r"<(/?)\s*(calls|tool_?calls?|invoke|parameter)([^>]*)>", re.I
 )
+
+# Model (hlavne DeepSeek) casto zapise ukoncovaci tag zkomolene.
+# V realnych session se objevilo `</call_call>` 313x, `< calls>` po odstraneni
+# DSML markeru, a ruzne varianty bez podtrzitka. Vse sjednotime.
+_MANGLED_TAG = re.compile(r"<\s*(/?)\s*(call_call|tool_call|tool_calls|calls)\s*>", re.I)
+
+
+def normalize_tags(text: str) -> str:
+    """Sjednoti zkomolene varianty tagu tool callu na <tool_call>/<tool_calls>."""
+    def fix(m: re.Match) -> str:
+        closing = m.group(1) or ""
+        name = m.group(2).lower()
+        name = "tool_calls" if name in ("calls", "call_call", "tool_calls") else "tool_call"
+        return f"<{closing}{name}>"
+
+    return _MANGLED_TAG.sub(fix, text)
 
 
 def normalize_dsml(text: str) -> str:
@@ -350,6 +386,13 @@ _LEAK = re.compile(
     re.I,
 )
 
+# Kdekoliv v textu zacina ozvena naseho promptu. Cokoliv za ni je halucinace
+# (model si domysli vysledek nastroje nebo cely dalsi tah) — proto text spis
+# odrizneme, nez abychom ho jen vymazali: za markerem nasleduje vymysleny obsah.
+_ECHO = re.compile(
+    r"\[(?:VYSLEDEK NASTROJE|TOOL RESULT|ASSISTANT|USER|SYSTEM)[^\]]*\]", re.I
+)
+
 
 def parse_tool_calls(text: str, tool_names: set[str] | None = None) -> tuple[str, list[dict]]:
     """Vrati (text_bez_tool_callu, [{'name':..,'arguments':{..}}]).
@@ -358,7 +401,16 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None) -> tuple[str
                 (chrani pred falesnymi pozitivy u bezneho JSON v odpovedi).
     """
     text = normalize_dsml(text)
-    # model obcas opise nase znacky z promptu — odstranit
+    text = normalize_tags(text)
+    # Model casto pokracuje "v nasem prepisu" — sam si domysli vysledek
+    # nastroje („[VYSLEDEK NASTROJE bash]\n...") a dalsi tah. Vse za prvni
+    # takovou ozvenou je halucinace: orezeme ji jeste PRED parsovanim, aby
+    # se z ni nevytezovaly falesne tool cally a aby se neulozila do historie
+    # (odtud se model vzor uci a opakuje ho — v jedne session 483x).
+    _m = _ECHO.search(text)
+    if _m:
+        text = text[: _m.start()]
+    # zbytek (kdyby ozvena byla na zacatku nebo bez zavorek)
     text = _LEAK.sub("", text)
     calls: list[dict] = []
 
@@ -420,6 +472,7 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None) -> tuple[str
     # 5) uklid obalu, ktere nemaji zustat ve viditelnem textu
     text = _TAG.sub("", text)
     text = re.sub(r"</?(?:invoke|parameter)\b[^>]*>", "", text, flags=re.I)
+
     return text.strip(), [c for c in calls if ok(c)]
 
 
