@@ -357,6 +357,74 @@ def _parse_params(body: str) -> dict:
     return args
 
 
+def _escape_inner_quotes(s: str) -> str:
+    """Escapuje uvozovky, ktere model zapomnel escapovat uvnitr stringu.
+
+    Heuristika: uvozovka uvnitr stringu je obsahova, kdyz za ni (po mezerach)
+    nenasleduje , } ] : ani konec — pak ji escapujeme.
+    """
+    out: list[str] = []
+    in_str = False
+    esc = False
+    n = len(s)
+    for i, ch in enumerate(s):
+        if esc:
+            out.append(ch)
+            esc = False
+            continue
+        if ch == "\\":
+            out.append(ch)
+            esc = True
+            continue
+        if ch == '"':
+            if not in_str:
+                in_str = True
+                out.append(ch)
+                continue
+            j = i + 1
+            while j < n and s[j] in " \t\r\n":
+                j += 1
+            nxt = s[j] if j < n else ""
+            if nxt in (",", "}", "]", ":", ""):
+                in_str = False
+                out.append(ch)
+            else:
+                out.append('\\"')
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _loads_lenient(s: str):
+    """json.loads, ktere prezije neescapovane uvozovky uvnitr stringu.
+
+    Model casto posle:
+        {"command": "... vyhledej \"Executing git\" v .rodata ..."}
+    tedy uvozovky uvnitr hodnoty BEZ escapovani. Striktni json.loads to zahodi
+    -> tool call zmizi a pi dostane jen text („model neposlal tool call").
+    """
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(_escape_inner_quotes(s))
+    except json.JSONDecodeError:
+        return None
+
+
+# ZACHRANA pro rozbity format: hodnota argumentu jako HOLY text (bez uvozovek),
+# ukoncena tagem nebo koncem. Priklad z realne session:
+#   {"name": "bash", "arguments": {"command":
+#   cd /root/x && echo "a" && grep -n "b" src/x.c | head -60
+#   </function>
+_RAW_ARG = re.compile(
+    r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*\{\s*"([^"]+)"\s*:\s*'
+    r'(?![\s]*")(.*?)\s*(?:</[a-z_]+>\s*$|\s*$)',
+    re.S,
+)
+
+
 def _find_json_objects(text: str):
     """Najde v textu vsechny vybalancovane JSON objekty {...} (i vic radku)."""
     out = []
@@ -410,16 +478,41 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None) -> tuple[str
     """
     text = normalize_dsml(text)
     text = normalize_tags(text)
-    # Model casto pokracuje "v nasem prepisu" — sam si domysli vysledek
-    # nastroje („[VYSLEDEK NASTROJE bash]\n...") a dalsi tah. Vse za prvni
-    # takovou ozvenou je halucinace: orezeme ji jeste PRED parsovanim, aby
-    # se z ni nevytezovaly falesne tool cally a aby se neulozila do historie
-    # (odtud se model vzor uci a opakuje ho — v jedne session 483x).
+    # Model casto pokracuje "v nasem prepisu" — sam si domysli vysledek nastroje
+    # („[VYSLEDEK NASTROJE bash]\n...") a dalsi tah. Takova cast je halucinace a
+    # nesmi se ulozit do viditelneho textu (odtud se model vzor uci a opakuje ho
+    # — v realne session 483x).
+    #
+    # POZOR: cally vsak hledame v CELÉM textu, ne jen pred ozvenou — model casto
+    # napise halucinaci a teprve PAK skutecny tool call (naměřeno: ozvena na
+    # pozici 2287, realny call na 8270). Orezavame proto jen viditelny text.
     _m = _ECHO.search(text)
-    if _m:
-        text = text[: _m.start()]
-    # zbytek (kdyby ozvena byla na zacatku nebo bez zavorek)
-    text = _LEAK.sub("", text)
+    cut = _m.start() if _m else len(text)
+    visible = text[:cut]
+
+    head_calls = _extract_calls(visible, tool_names)
+    calls = head_calls or _extract_calls(text, tool_names)
+
+    text = _LEAK.sub("", visible)
+
+    # odstran z viditelneho textu pripadny osirely tool-call JSON
+    _jm = re.search(r'\{\s*"name"\s*:', text)
+    if calls and _jm:
+        text = text[: _jm.start()]
+
+    # 5) uklid obalu, ktere nemaji zustat ve viditelnem textu
+    text = _TAG.sub("", text)
+    text = re.sub(r"</?(?:invoke|parameter|function|tool_call|tool_calls)\b[^>]*>",
+                  "", text, flags=re.I)
+    # model obcas odpoved utne uprostred tagu (napr. zbytek "</tool")
+    text = re.sub(r"</?(?:tool|call|tool_call|tool_calls|invoke|parameter|function)[a-z_]*\s*$",
+                  "", text, flags=re.I)
+
+    return text.strip(), calls
+
+
+def _extract_calls(text: str, tool_names: set[str] | None) -> list[dict]:
+    """Vytahne vsechna tool volani z textu (vsechny podporovane formaty)."""
     calls: list[dict] = []
 
     def ok(c: dict | None) -> bool:
@@ -427,61 +520,52 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None) -> tuple[str
 
     # 1) <invoke name="x"><parameter ...>…</parameter></invoke>  (DSML / Anthropic)
     if "<invoke" in text.lower():
-        def take_invoke(m):
+        for m in _INVOKE.finditer(text):
             calls.append({"name": m.group(1), "arguments": _parse_params(m.group(2))})
-            return ""
-        text = _INVOKE.sub(take_invoke, text)
+        if calls:
+            return calls
 
     # 2) <tool_call>{"name":..,"arguments":..}</tool_call>
-    if not calls:
-        def take_json(m):
-            try:
-                c = _coerce(json.loads(m.group(1)))
-            except json.JSONDecodeError:
-                sub = re.search(r"\{.*\}", m.group(1), re.S)
-                c = None
-                if sub:
-                    try:
-                        c = _coerce(json.loads(sub.group(0)))
-                    except json.JSONDecodeError:
-                        c = None
-            if c:
-                calls.append(c)
-                return ""
-            return m.group(0)
-        text = _JSON_BLOCK.sub(take_json, text)
+    for m in _JSON_BLOCK.finditer(text):
+        c = _coerce(_loads_lenient(m.group(1)))
+        if not c:
+            sub = re.search(r"\{.*\}", m.group(1), re.S)
+            if sub:
+                c = _coerce(_loads_lenient(sub.group(0)))
+        if ok(c):
+            calls.append(c)
+    if calls:
+        return calls
 
     # 3) fenced json {"name":..,"arguments":..}
-    if not calls:
-        def take_fence(m):
-            try:
-                c = _coerce(json.loads(m.group(1)))
-            except json.JSONDecodeError:
-                c = None
-            if ok(c):
-                calls.append(c)
-                return ""
-            return m.group(0)
-        text = _FENCE.sub(take_fence, text)
+    for m in _FENCE.finditer(text):
+        c = _coerce(_loads_lenient(m.group(1)))
+        if ok(c):
+            calls.append(c)
+    if calls:
+        return calls
 
     # 4) BARE JSON bez obalu — DeepSeek to casto posle takhle:
     #    {"name": "read", "arguments": {"path": "..."}}
-    if not calls and tool_names:
-        for a, b, chunk in reversed(_find_json_objects(text)):
-            try:
-                c = _coerce(json.loads(chunk))
-            except json.JSONDecodeError:
-                continue
-            if ok(c):
-                calls.append(c)
-                text = text[:a] + text[b:]
-        calls.reverse()
+    #    Skenujeme az OPRAVENY text: na neescapovanych uvozovkach se jinak
+    #    rozsype sledovani string stavu a nenajde se nic.
+    for _a, _b, chunk in _find_json_objects(_escape_inner_quotes(text)):
+        c = _coerce(_loads_lenient(chunk))
+        if ok(c):
+            calls.append(c)
+    if calls:
+        return calls
 
-    # 5) uklid obalu, ktere nemaji zustat ve viditelnem textu
-    text = _TAG.sub("", text)
-    text = re.sub(r"</?(?:invoke|parameter)\b[^>]*>", "", text, flags=re.I)
-
-    return text.strip(), [c for c in calls if ok(c)]
+    # 5) ZACHRANA: model rozbije format a posle hodnotu jako HOLY text:
+    #    {"name": "bash", "arguments": {"command":
+    #    cd /neco && echo "x"
+    #    </function>
+    #    Chybi uvozovky i zavorky -> vezmeme vse po dvojtečce jako hodnotu.
+    for m in _RAW_ARG.finditer(text):
+        raw = m.group(3).strip()
+        if raw:
+            calls.append({"name": m.group(1), "arguments": {m.group(2): raw}})
+    return [c for c in calls if ok(c)]
 
 
 def to_openai_tool_calls(calls: list[dict]) -> list[dict]:
