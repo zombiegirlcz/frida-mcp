@@ -1,0 +1,40 @@
+# ── credentials / live secrets ─────────────────────────────
+secrets/
+**/secrets/
+*_token
+*_uid
+token.txt
+*.sp
+
+# ── velké binárky (nejdou do gitu) ─────────────────────────
+frida-server
+*.jar
+*.apk
+*.zip
+*.so
+*.dex
+*.sqlite
+*.db
+
+# ── scratch / build artefakty ──────────────────────────────
+work/
+**/work/
+logs/
+**/logs/
+**/node_modules/
+**/.venv/
+**/.venv-tools/
+__pycache__/
+*.pyc
+*.tmp
+frida-server*
+*.xz
+*.log
+*.pid
+*.jsonl
+
+# ── extension runtime ──────────────────────────────────────
+models.json.bak.frida-mcp
+models.json.tmp.frida-mcp
+test/
+.pi/

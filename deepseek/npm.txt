@@ -1,0 +1,136 @@
+frida
+Inject JavaScript to explore native apps on Windows, Mac, Linux, iOS and Android
+Version 17.17.0 published 2026-08-05 by GitHub Actions
+Maintainers: oleavr
+Keywords: debugger tracer instrumentation hooking inject windows macos linux ios iphone ipad android
+https://npm.im/frida
+
+frida-java-bridge
+Java runtime interop from Frida
+Version 7.0.13 published 2026-03-17 by oleavr
+Maintainers: oleavr
+Keywords: frida-gum frida-gum-bridge
+https://npm.im/frida-java-bridge
+
+frida-swift-bridge
+Swift runtime interop from Frida
+Version 3.0.2 published 2025-06-09 by oleavr
+Maintainers: oleavr hot3eed
+Keywords: frida-gum frida-gum-bridge
+https://npm.im/frida-swift-bridge
+
+frida-objc-bridge
+Objective-C runtime interop from Frida
+Version 8.0.6 published 2026-05-01 by oleavr
+Maintainers: oleavr
+Keywords: frida-gum frida-gum-bridge
+https://npm.im/frida-objc-bridge
+
+@types/frida-gum
+TypeScript definitions for frida-gum
+Version 19.10.0 published 2026-07-17 by types
+Maintainers: types
+https://npm.im/@types/frida-gum
+
+frida-compile
+Compile a Frida script comprised of one or more Node.js modules
+Version 19.0.5 published 2026-03-09 by oleavr
+Maintainers: oleavr
+Keywords: frida
+https://npm.im/frida-compile
+
+@frida/events
+Node.js's events module for Frida
+Version 4.0.4 published 2022-07-04 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+Keywords: events eventEmitter eventDispatcher listeners
+https://npm.im/@frida/events
+
+@frida/https
+Node.js's https module for Frida
+Version 1.0.0 published 2021-10-13 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+https://npm.im/@frida/https
+
+@frida/net
+Node.js's net module for Frida
+Version 5.0.0 published 2025-06-18 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+Keywords: frida
+https://npm.im/@frida/net
+
+@frida/vm
+Node.js's vm module for Frida
+Version 2.0.0 published 2021-10-07 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+Keywords: vm browser eval
+https://npm.im/@frida/vm
+
+@frida/timers
+Node.js's timers module for Frida
+Version 3.0.0 published 2021-10-07 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+Keywords: timers
+https://npm.im/@frida/timers
+
+@frida/path
+Node.js's path module for Frida
+Version 2.0.3 published 2022-10-09 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+Keywords: browser browserify path
+https://npm.im/@frida/path
+
+@frida/stream
+Node.js's stream module for Frida
+Version 1.0.2 published 2022-08-03 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+https://npm.im/@frida/stream
+
+@frida/os
+Node.js's os module for Frida
+Version 1.0.2 published 2021-10-06 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+https://npm.im/@frida/os
+
+@frida/string_decoder
+Node.js's string_decoder module for Frida
+Version 2.0.0 published 2021-10-15 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+Keywords: string decoder
+https://npm.im/@frida/string_decoder
+
+@frida/http
+Node.js's http module for Frida
+Version 4.0.2 published 2022-09-26 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+Keywords: frida
+https://npm.im/@frida/http
+
+@frida/assert
+Node.js's assert module for Frida
+Version 3.0.2 published 2021-10-12 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+Keywords: assert
+https://npm.im/@frida/assert
+
+@frida/util
+Node.js's util module for Frida
+Version 1.0.3 published 2021-11-01 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+Keywords: util
+https://npm.im/@frida/util
+
+@frida/buffer
+Node.js's buffer module for Frida
+Version 7.0.4 published 2021-10-12 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+Keywords: arraybuffer browser browserify buffer compatible dataview uint8array
+https://npm.im/@frida/buffer
+
+@frida/querystring
+Node.js's querystring module for Frida
+Version 1.0.0 published 2021-10-11 by oleavr
+Maintainers: fridadotre dweinstein oleavr hsorbo
+Keywords: query querystring
+https://npm.im/@frida/querystring
+

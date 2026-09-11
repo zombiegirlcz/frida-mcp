@@ -1,0 +1,51 @@
+{
+  "workflow": {
+    "phases": {
+      "brainstorm": "pending",
+      "plan": "pending",
+      "execute": "pending",
+      "verify": "pending",
+      "review": "pending",
+      "finish": "pending"
+    },
+    "currentPhase": null,
+    "artifacts": {
+      "brainstorm": null,
+      "plan": null,
+      "execute": null,
+      "verify": null,
+      "review": null,
+      "finish": null
+    },
+    "prompted": {
+      "brainstorm": false,
+      "plan": false,
+      "execute": false,
+      "verify": false,
+      "review": false,
+      "finish": false
+    }
+  },
+  "tdd": {
+    "phase": "idle",
+    "testFiles": [],
+    "sourceFiles": [
+      "/root/frida-mcp/bridge/dsui.py",
+      "/root/frida-mcp/bridge/runner.py",
+      "/root/frida-mcp/agent/pow_rpc.src.js",
+      "/root/frida-mcp/bridge/powd.py",
+      "/root/frida-mcp/bridge/deepseek_api.py",
+      "/root/frida-mcp/bridge/openai_shim.py"
+    ],
+    "redVerificationPending": false
+  },
+  "debug": {
+    "active": false,
+    "investigated": true,
+    "fixAttempts": 0
+  },
+  "verification": {
+    "verified": false,
+    "verificationWaived": false
+  }
+}

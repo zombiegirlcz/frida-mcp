@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""frida-chat — most mezi DeepSeek appkou a pi (proot).
+
+Příkazy:
+  frida-chat status              # stav (foreground, input, počet zpráv)
+  frida-chat read [--json]       # přečte aktuální konverzaci (oči)
+  frida-chat send "text"         # napíše a odešle zprávu (ruce)
+  frida-chat watch [--port N]    # daemon: polluje UI a streamuje nové
+                                 # zprávy jako JSONL na TCP 127.0.0.1:N
+                                 # (default 13341) + do bridge/chat.jsonl
+  frida-chat watch --connect H:P # místo serveru se připojí k pi (pi poslouchá)
+  frida-chat loop [--connect H:P]  # SMYČKA: odpověď AI → code bloky → shell v prootu
+                                   #   → výsledek zpět do chatu. --dry-run, --max-steps,
+                                   #   --timeout. Detaily: PROTOCOL.md
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from bridge import dsui  # noqa: E402
+
+BRIDGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+JSONL = os.path.join(BRIDGE_DIR, "bridge", "chat.jsonl")
+LOG = os.path.join(BRIDGE_DIR, "logs", "frida-chat.log")
+DEFAULT_PORT = 13341
+V = 1
+
+
+def _ts() -> int:
+    return int(time.time() * 1000)
+
+
+def _log(msg: str) -> None:
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
+    with open(LOG, "a", encoding="utf-8") as f:
+        f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+
+
+def _emit_atomic(path: str, obj: dict) -> None:
+    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def cmd_status(_a) -> int:
+    print(json.dumps(dsui.status(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_read(a) -> int:
+    nodes = dsui.dump()
+    msgs = dsui.conversation(nodes)
+    if a.json:
+        print(json.dumps([m.__dict__ for m in msgs], ensure_ascii=False, indent=2))
+    else:
+        for m in msgs:
+            tag = {"user": "👤", "assistant": "🤖", "?": "❓"}[m.role]
+            print(f"{tag} {m.text}")
+    return 0
+
+
+def cmd_send(a) -> int:
+    dsui.send_message(a.text)
+    _emit_atomic(JSONL, {"v": V, "dir": "to_chat", "ts": _ts(),
+                         "kind": "inject", "text": a.text, "src": "pi"})
+    print("odesláno", file=sys.stderr)
+    return 0
+
+
+class Pusher:
+    """Připojuje se k pi (který poslouchá na host:port) a posílá mu JSONL."""
+
+    def __init__(self, host: str, port: int):
+        self.host, self.port = host, port
+        self.sock: socket.socket | None = None
+        self.lock = threading.Lock()
+
+    def _connect(self) -> None:
+        s = socket.socket()
+        s.settimeout(3)
+        s.connect((self.host, self.port))
+        self.sock = s
+
+    def send(self, obj: dict) -> None:
+        line = (json.dumps(obj, ensure_ascii=False) + "\n").encode()
+        with self.lock:
+            for _ in range(2):
+                try:
+                    if self.sock is None:
+                        self._connect()
+                    self.sock.sendall(line)  # type: ignore[union-attr]
+                    return
+                except OSError:
+                    try:
+                        if self.sock:
+                            self.sock.close()
+                    except OSError:
+                        pass
+                    self.sock = None
+            _log(f"push selhal -> {self.host}:{self.port}")
+
+
+class Hub:
+    """Drží TCP klienty a rozesílá jim JSONL."""
+
+    def __init__(self, port: int):
+        self.port = port
+        self.clients: list[socket.socket] = []
+        self.lock = threading.Lock()
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind(("127.0.0.1", port))
+        self.srv.listen(8)
+
+    def serve_forever(self) -> None:
+        while True:
+            try:
+                c, _ = self.srv.accept()
+            except OSError:
+                return
+            with self.lock:
+                self.clients.append(c)
+
+    def broadcast(self, obj: dict) -> None:
+        line = (json.dumps(obj, ensure_ascii=False) + "\n").encode()
+        dead = []
+        with self.lock:
+            for c in self.clients:
+                try:
+                    c.sendall(line)
+                except OSError:
+                    dead.append(c)
+            for c in dead:
+                self.clients.remove(c)
+
+
+def cmd_watch(a) -> int:
+    hub = None
+    pusher = None
+    if a.connect:
+        host, _, p = a.connect.partition(":")
+        pusher = Pusher(host or "127.0.0.1", int(p))
+        print(f"[*] push -> {a.connect} (JSONL), log {JSONL}", flush=True)
+    elif a.port:
+        hub = Hub(a.port)
+        threading.Thread(target=hub.serve_forever, daemon=True).start()
+        print(f"[*] stream na 127.0.0.1:{a.port} (JSONL), log {JSONL}", flush=True)
+
+    seen: set[tuple[str, str]] = set()
+    last_err = None
+    while True:
+        try:
+            nodes = dsui.dump()
+        except dsui.UiError as e:
+            if str(e) != last_err:
+                _log(f"dump error: {e}")
+                last_err = str(e)
+            time.sleep(a.interval)
+            continue
+        last_err = None
+        fg = dsui.foreground_pkg()
+        if fg and fg != dsui.PKG:
+            time.sleep(a.interval)
+            continue
+        for m in dsui.conversation(nodes):
+            key = (m.role, m.text)
+            if key in seen:
+                continue
+            seen.add(key)
+            ev = {"v": V, "dir": "out" if m.role == "assistant" else "in",
+                  "ts": _ts(), "src": dsui.PKG, "kind": "reply" if m.role == "assistant" else "prompt",
+                  "role": m.role, "x": m.x, "y": m.y, "text": m.text}
+            _emit_atomic(JSONL, ev)
+            if hub:
+                hub.broadcast(ev)
+            if pusher:
+                pusher.send(ev)
+            if a.verbose:
+                print(json.dumps(ev, ensure_ascii=False), flush=True)
+        time.sleep(a.interval)
+
+
+def cmd_loop(a) -> int:
+    """Smyčka: odpověď AI → code bloky → shell v prootu → výsledek zpět do chatu."""
+    from bridge import runner
+
+    hub = None
+    pusher = None
+    if a.connect:
+        host, _, p = a.connect.partition(":")
+        pusher = Pusher(host or "127.0.0.1", int(p))
+    elif a.port:
+        hub = Hub(a.port)
+        threading.Thread(target=hub.serve_forever, daemon=True).start()
+
+    def push(ev: dict) -> None:
+        _emit_atomic(JSONL, ev)
+        if hub:
+            hub.broadcast(ev)
+        if pusher:
+            pusher.send(ev)
+
+    # seed: existující zprávy nechceme znovu vykonávat
+    seen: set[str] = set()
+    if not a.no_seed:
+        try:
+            for m in dsui.conversation():
+                seen.add(m.text)
+        except dsui.UiError:
+            pass
+
+    steps = 0
+    print(f"[*] loop: interval={a.interval}s timeout={a.timeout}s dry_run={a.dry_run}", flush=True)
+    while True:
+        try:
+            nodes = dsui.dump()
+        except dsui.UiError as e:
+            _log(f"loop dump error: {e}")
+            time.sleep(a.interval)
+            continue
+        fg = dsui.foreground_pkg()
+        if fg and fg != dsui.PKG:
+            time.sleep(a.interval)
+            continue
+        for m in dsui.conversation(nodes):
+            if m.role != "assistant" or m.text in seen:
+                continue
+            seen.add(m.text)
+            cmds = runner.extract_commands(m.text)
+            if not any(c.runnable for c in cmds):
+                continue
+            steps += 1
+            push({"v": V, "dir": "out", "ts": _ts(), "src": dsui.PKG,
+                  "kind": "reply", "role": "assistant", "text": m.text})
+            print(f"[*] krok {steps}: {len(cmds)} code blok(ů)", flush=True)
+            if a.dry_run:
+                for c in cmds:
+                    print(f"    [dry-run] {c.lang}: {c.code[:80]!r}")
+                if a.max_steps and steps >= a.max_steps:
+                    print(f"[*] dosaženo max-steps={a.max_steps}, končím")
+                    return 0
+                continue
+            result = runner.run_commands(cmds, timeout=a.timeout)
+            push({"v": V, "dir": "to_chat", "ts": _ts(), "kind": "inject",
+                  "src": "pi", "text": result})
+            dsui.send_message(result)
+            print(f"[*] výsledek odeslán ({len(result)} znaků)", flush=True)
+            if a.max_steps and steps >= a.max_steps:
+                print(f"[*] dosaženo max-steps={a.max_steps}, končím")
+                return 0
+        time.sleep(a.interval)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="frida-chat", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("status"); p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("read"); p.add_argument("--json", action="store_true"); p.set_defaults(fn=cmd_read)
+
+    p = sub.add_parser("send"); p.add_argument("text"); p.set_defaults(fn=cmd_send)
+
+    p = sub.add_parser("watch")
+    p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--connect", default="", metavar="HOST:PORT",
+                   help="připojit se k pi (pi poslouchá) místo vlastního serveru")
+    p.add_argument("--interval", type=float, default=2.0)
+    p.add_argument("--verbose", action="store_true")
+    p.set_defaults(fn=cmd_watch)
+
+    p = sub.add_parser("loop")
+    p.add_argument("--port", type=int, default=0)
+    p.add_argument("--connect", default="", metavar="HOST:PORT")
+    p.add_argument("--interval", type=float, default=2.0)
+    p.add_argument("--timeout", type=int, default=60)
+    p.add_argument("--max-steps", type=int, default=0, help="0 = bez limitu")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--no-seed", action="store_true",
+                   help="TEST ONLY: neoznačovat existující zprávy jako zpracované")
+    p.set_defaults(fn=cmd_loop)
+
+    a = ap.parse_args()
+    return a.fn(a)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

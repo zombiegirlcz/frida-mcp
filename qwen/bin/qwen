@@ -1,0 +1,8 @@
+#!/bin/bash
+# qwen — wrapper: najde python s fridou a spusti cli/qwen.py
+set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+. "$ROOT/../scripts/_python.sh"
+PY="$(frida_mcp_python "$ROOT/..")"
+exec "$PY" "$ROOT/cli/qwen.py" "$@"

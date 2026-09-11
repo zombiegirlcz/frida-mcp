@@ -1,0 +1,13 @@
+{
+  "name": "frida-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "buffer": "^6.0.3",
+    "frida-java-bridge": "7.0.13"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

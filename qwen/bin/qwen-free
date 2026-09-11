@@ -1,0 +1,92 @@
+#!/bin/bash
+# qwen-free — sprava lokalniho OpenAI shimu pro pi provider "qwen-free".
+#
+#   bin/qwen-free capture    # zachyti hlavicky z Qwen appky (musi bezet + byt v popredi)
+#   bin/qwen-free start      # spusti shim na 127.0.0.1:13360
+#   bin/qwen-free stop
+#   bin/qwen-free restart
+#   bin/qwen-free status
+set -u
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PORT="${QWEN_SHIM_PORT:-13360}"
+PIDFILE="$ROOT/logs/qwen-free.pid"
+HDRPID="$ROOT/logs/qwen-hdrd.pid"
+LOG="$ROOT/logs/qwen-shim.log"
+HDRLOG="$ROOT/logs/qwen-hdrd.log"
+. "$ROOT/../scripts/_python.sh"
+PY="$(frida_mcp_python "$ROOT/..")"
+PKG="ai.qwenlm.chat.android"
+
+mkdir -p "$ROOT/logs" "$ROOT/secrets"
+
+is_up() { (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && exec 3>&- && return 0 || return 1; }
+
+capture() {
+  local t="${1:-90}"
+  if ! (ashell -c "pgrep -f $PKG" >/dev/null 2>&1); then
+    ashell -c "/product/bin/su -c \"am start -n $PKG/$PKG.MainActivity\"" >/dev/null 2>&1 || true
+    sleep 4
+  fi
+  echo "cekam na hlavicky z appky (az ${t}s) — nech Qwen appku v popredi a posli zpravu..."
+  timeout $((t+20)) "$PY" "$ROOT/bridge/qwen_hdrd.py" --once --timeout "$t"
+}
+
+start() {
+  if is_up; then echo "uz bezi na 127.0.0.1:$PORT"; else
+    setsid nohup "$PY" "$ROOT/bridge/qwen_shim.py" --port "$PORT" >"$LOG" 2>&1 </dev/null &
+    echo $! > "$PIDFILE"
+    sleep 2
+    if is_up; then echo "shim: http://127.0.0.1:$PORT/v1 (pid $(cat "$PIDFILE"))";
+    else echo "CHYBA pri startu — viz $LOG"; tail -5 "$LOG"; return 1; fi
+  fi
+  # daemon pro prubezny refresh WAF hlavicek (volitelny, neblokuje)
+  if [ -f "$HDRPID" ] && kill -0 "$(cat "$HDRPID")" 2>/dev/null; then
+    echo "hdrd: uz bezi"
+  else
+    setsid nohup "$PY" "$ROOT/bridge/qwen_hdrd.py" >"$HDRLOG" 2>&1 </dev/null &
+    echo $! > "$HDRPID"
+    echo "hdrd: refresh hlavicek bezi (pid $(cat "$HDRPID"))"
+  fi
+}
+
+stop() {
+  if [ -f "$PIDFILE" ]; then kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; fi
+  if [ -f "$HDRPID" ]; then kill "$(cat "$HDRPID")" 2>/dev/null; rm -f "$HDRPID"; fi
+  for p in $(pgrep -f "qwen_shim\.py" 2>/dev/null) $(pgrep -f "qwen_hdrd\.py" 2>/dev/null); do
+    kill "$p" 2>/dev/null
+  done
+  sleep 1
+  is_up && echo "porad bezi?" || echo "zastaveno"
+}
+
+status() {
+  if is_up; then echo "shim bezi na 127.0.0.1:$PORT"; else echo "shim nebezi"; fi
+  if [ -f "$ROOT/secrets/qwen_headers.json" ]; then
+    echo "hlavicky: $(python3 -c "
+import json,time
+h=json.load(open('$ROOT/secrets/qwen_headers.json'))
+age=int(time.time()-h.get('captured_at',0))
+print(f\"stari {age}s, wua={len(h.get('x-mini-wua',''))}B, waf={'ano' if h.get('app_waf') else 'NE'}\")")"
+  else
+    echo "hlavicky: chybi (spust 'capture')"
+  fi
+  if [ -f "$ROOT/secrets/qwen_token" ]; then
+    python3 -c "
+import base64,json
+t=open('$ROOT/secrets/qwen_token').read().strip()
+p=t.split('.')[1]; p+='='*(-len(p)%4)
+d=json.loads(base64.urlsafe_b64decode(p))
+import time
+print(f\"token: id={d.get('id','?')[:8]}… exp za {(d.get('exp',0)-time.time())/86400:.1f} dni\")" 2>/dev/null || echo "token: ?"
+  fi
+  echo "--- log (poslednich 5) ---"; tail -5 "$LOG" 2>/dev/null || true
+}
+
+case "${1:-status}" in
+  capture) shift; capture "${1:-90}" ;;
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  status) status ;;
+  *) echo "pouziti: $0 capture [sec]|start|stop|restart|status"; exit 2 ;;
+esac

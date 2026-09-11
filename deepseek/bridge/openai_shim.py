@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""openai_shim — lokální OpenAI-compatible endpoint nad DeepSeek API (PoW přes fridu).
+
+pi → http://127.0.0.1:13350/v1/chat/completions → DeepSeek /api/v0/chat/completion
+
+Spuštění:
+    .venv/bin/python bridge/openai_shim.py [--port 13350]
+
+Vyžaduje: běžící DeepSeek appku + frida-server (PoW) a secrets/deepseek_token.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # <root>/<app>
+_REPO = os.path.dirname(_PKG)                                       # <root>
+for _p in (_PKG, _REPO):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from bridge.deepseek_api import DeepSeekAPI
+from common.tokenauto import ensure_token
+from common.toolbridge import (StreamSplitter, build_prompt, parse_tool_calls,
+                               to_openai_tool_calls, tool_names)
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOKEN = os.path.join(ROOT, "secrets", "deepseek_token")
+MODEL = os.environ.get("DEEPSEEK_FREE_MODEL", "deepseek-chat")
+
+_lock = threading.Lock()
+_api: DeepSeekAPI | None = None
+_pow = None
+
+
+def get_api() -> DeepSeekAPI:
+    """Lazily vytvoří klienta; frida PoW helper se ZKOUSÍ ZNOVU, dokud nechytí."""
+    global _api, _pow
+    with _lock:
+        if _api is None:
+            if not ensure_token(TOKEN):
+                raise RuntimeError(
+                    "chybí DeepSeek token a nejde vytáhnout (je appka nainstalovaná "
+                    "a přihlášená? zkus: python3 scripts/ensure_tokens.py)")
+            tok = open(TOKEN, encoding="utf-8").read().strip()
+            _api = DeepSeekAPI(tok, pow_helper=None)
+        if _pow is None:
+            try:
+                from bridge.powd import PowHelper
+                p = PowHelper()
+                p.attach()
+                _pow = p
+                _api.pow = p          # doplnit do už vytvořeného klienta
+                print("[shim] frida PoW helper připojen", file=sys.stderr)
+            except Exception as e:  # noqa: BLE001
+                print(f"[shim] frida attach selhal: {e}", file=sys.stderr)
+        return _api
+
+
+def _ensure_attached() -> None:
+    """Overi, ze PoW helper ZIJE (ne jen ze proces existuje); kdyz ne, znovu attachne."""
+    global _pow
+    if _pow is not None and _pow.alive():
+        return
+    if _pow is not None:
+        print("[shim] PoW skript je mrtvy -> re-attach", file=sys.stderr)
+        _pow = None
+    get_api()
+
+
+def flatten(messages: list[dict]) -> str:
+    """OpenAI messages → jeden prompt (DeepSeek /completion bere jen prompt).
+
+    Historie se posílá celá, protože každý request jde do nové session.
+    """
+    parts: list[str] = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if isinstance(content, list):  # OpenAI content parts
+            content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+        if role == "system":
+            parts.append(f"[SYSTEM]\n{content}")
+        elif role == "assistant":
+            parts.append(f"[ASSISTANT]\n{content}")
+        else:
+            parts.append(f"[USER]\n{content}")
+    return "\n\n".join(parts)
+
+
+def complete_stream(body: dict):
+    """Generator textovych chunku — zivi stream z DeepSeeku (nic se nebufferuje)."""
+    _ensure_attached()
+    api = get_api()
+    prompt = build_prompt(body.get("messages", []), body.get("tools"))
+    session = api.create_session()
+    yield from api.completion_stream(
+        session["id"], prompt, thinking_enabled=bool(body.get("reasoning_effort")))
+
+
+def complete(body: dict) -> str:
+    return "".join(complete_stream(body))
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):  # noqa: A003
+        if os.environ.get("SHIM_VERBOSE"):
+            sys.stderr.write("[shim] " + (fmt % args) + "\n")
+
+    def _json(self, code: int, obj: dict) -> None:
+        data = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        if self.path.rstrip("/").endswith("/models"):
+            self._json(200, {"object": "list", "data": [
+                {"id": MODEL, "object": "model", "created": int(time.time()),
+                 "owned_by": "deepseek-free(frida)"}]})
+            return
+        self._json(404, {"error": {"message": "not found"}})
+
+    def do_POST(self):  # noqa: N802
+        if not self.path.rstrip("/").endswith("/chat/completions"):
+            self._json(404, {"error": {"message": f"unsupported path {self.path}"}})
+            return
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except Exception as e:  # noqa: BLE001
+            self._json(400, {"error": {"message": f"bad json: {e}"}})
+            return
+        if os.environ.get("SHIM_DUMP"):
+            with open(os.environ["SHIM_DUMP"], "a", encoding="utf-8") as f:
+                f.write(json.dumps(body, ensure_ascii=False) + "\n")
+        names = tool_names(body.get("tools"))
+        cid = "chatcmpl-" + uuid.uuid4().hex[:24]
+        created = int(time.time())
+
+        if body.get("stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            def chunk(delta: dict, finish=None) -> None:
+                obj = {"id": cid, "object": "chat.completion.chunk", "created": created,
+                       "model": body.get("model", MODEL),
+                       "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+                self.wfile.write(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode())
+                self.wfile.flush()
+
+            chunk({"role": "assistant", "content": ""})
+            sp = StreamSplitter(names)
+            try:
+                for piece_in in complete_stream(body):
+                    piece = sp.feed(piece_in)
+                    if piece:
+                        chunk({"content": piece})
+                tail, calls = sp.finish()
+                if tail:
+                    chunk({"content": tail})
+                if calls:
+                    for i, tc in enumerate(to_openai_tool_calls(calls)):
+                        chunk({"tool_calls": [{"index": i, "id": tc["id"], "type": "function",
+                                               "function": tc["function"]}]})
+                    chunk({}, "tool_calls")
+                else:
+                    chunk({}, "stop")
+            except Exception as e:  # noqa: BLE001
+                chunk({"content": f"\n\n[chyba: {e}]"})
+                chunk({}, "stop")
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            return
+
+        try:
+            text = complete(body)
+        except Exception as e:  # noqa: BLE001
+            self._json(500, {"error": {"message": str(e), "type": "deepseek_free_error"}})
+            return
+        text, calls = parse_tool_calls(text, names)
+        if os.environ.get("SHIM_DUMP"):
+            with open(os.environ["SHIM_DUMP"] + ".raw", "a", encoding="utf-8") as f:
+                f.write(json.dumps({"parsed_calls": len(calls), "text": text},
+                                   ensure_ascii=False) + "\n")
+
+        msg = {"role": "assistant", "content": text or None}
+        if calls:
+            msg["tool_calls"] = to_openai_tool_calls(calls)
+        self._json(200, {
+            "id": cid, "object": "chat.completion", "created": created,
+            "model": body.get("model", MODEL),
+            "choices": [{"index": 0, "message": msg,
+                         "finish_reason": "tool_calls" if calls else "stop"}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        })
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=int(os.environ.get("SHIM_PORT", "13350")))
+    ap.add_argument("--host", default="127.0.0.1")
+    a = ap.parse_args()
+    if not os.path.exists(TOKEN):
+        print("chybí secrets/deepseek_token", file=sys.stderr)
+        return 2
+    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    print(f"[shim] deepseek-free (frida PoW) na http://{a.host}:{a.port}/v1  model={MODEL}",
+          flush=True)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

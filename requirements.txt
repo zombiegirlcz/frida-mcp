@@ -1,0 +1,2 @@
+# frida-mcp — jediná závislost (verze musí odpovídat frida-serveru na zařízení)
+frida==17.18.0

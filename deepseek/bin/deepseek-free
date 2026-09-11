@@ -1,0 +1,56 @@
+#!/bin/bash
+# deepseek-free — správa lokálního OpenAI shimu pro pi provider "deepseek-free".
+#
+#   bin/deepseek-free start     # spustí shim na 127.0.0.1:13350
+#   bin/deepseek-free stop      # zastaví
+#   bin/deepseek-free status    # stav + poslední log
+#   bin/deepseek-free restart
+#
+# Shim:  pi → http://127.0.0.1:13350/v1 → DeepSeek API (PoW přes fridu)
+# Vyžaduje: běžící DeepSeek appku + frida-server (PoW).
+set -u
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PORT="${SHIM_PORT:-13350}"
+PIDFILE="$ROOT/logs/deepseek-free.pid"
+LOG="$ROOT/logs/shim.log"
+. "$ROOT/../scripts/_python.sh"
+PY="$(frida_mcp_python "$ROOT/..")"
+PKG="com.deepseek.chat"
+
+mkdir -p "$ROOT/logs"
+
+is_up() { (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && exec 3>&- && return 0 || return 1; }
+
+start() {
+  if is_up; then echo "už běží na 127.0.0.1:$PORT"; return 0; fi
+  # DeepSeek appka (kvůli PoW)
+  if ! (ashell -c "pgrep -f $PKG" >/dev/null 2>&1); then
+    ashell -c "/product/bin/su -c \"am start -n $PKG/$PKG.MainActivity\"" >/dev/null 2>&1 || true
+    sleep 4
+  fi
+  setsid nohup "$PY" "$ROOT/bridge/openai_shim.py" --port "$PORT" >"$LOG" 2>&1 </dev/null &
+  echo $! > "$PIDFILE"
+  sleep 2
+  if is_up; then echo "spuštěno na http://127.0.0.1:$PORT/v1 (pid $(cat "$PIDFILE"))"
+  else echo "CHYBA při startu — viz $LOG"; tail -5 "$LOG"; return 1; fi
+}
+
+stop() {
+  if [ -f "$PIDFILE" ]; then kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; fi
+  for p in $(pgrep -f "openai_shim\.py" 2>/dev/null); do kill "$p" 2>/dev/null; done
+  sleep 1
+  is_up && echo "pořád běží?" || echo "zastaveno"
+}
+
+status() {
+  if is_up; then echo "běží na 127.0.0.1:$PORT"; else echo "neběží"; fi
+  echo "--- log (posledních 8) ---"; tail -8 "$LOG" 2>/dev/null || true
+}
+
+case "${1:-status}" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  status) status ;;
+  *) echo "použití: $0 start|stop|restart|status"; exit 2 ;;
+esac

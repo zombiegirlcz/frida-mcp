@@ -1,0 +1,36 @@
+{
+  "name": "frida-mcp",
+  "version": "1.0.0",
+  "description": "DeepSeek + Qwen chat apps as free pi providers — tokens and PoW/WAF signatures are pulled out of the apps over frida, on the device, with no API keys.",
+  "keywords": ["pi-package", "frida", "deepseek", "qwen", "provider", "android"],
+  "license": "MIT",
+  "type": "module",
+  "private": false,
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./deepseek/skills"]
+  },
+  "files": [
+    "extensions/",
+    "common/",
+    "scripts/",
+    "deepseek/agent/",
+    "deepseek/bin/",
+    "deepseek/bridge/",
+    "deepseek/skills/",
+    "qwen/agent/",
+    "qwen/bin/",
+    "qwen/bridge/",
+    "bard/agent/",
+    "bard/bin/",
+    "bard/bridge/",
+    "README.md",
+    "AGENTS.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
