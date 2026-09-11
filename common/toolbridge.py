@@ -130,6 +130,14 @@ def build_prompt(messages: list[dict], tools: list[dict] | None = None) -> str:
             else:
                 parts.append(f"[SYSTEM]\n{content}")
         elif role == "assistant":
+            # Sanitizace historie: kdyz se model v minulosti "naučil" psat
+            # nase markery (vznikla echo smycka), zustaly ve session otrávené
+            # zpravy. Kdybychom je poslali zpatky, model by v nich videl svuj
+            # vlastni vzor a opakoval by ho dal. Proto je pri skladani promptu
+            # ocistime je (ponechame jen text pred prvni ozvenou).
+            em = _ECHO.search(content)
+            if em:
+                content = content[: em.start()].rstrip()
             block = f"[ASSISTANT]\n{content}" if content else "[ASSISTANT]"
             for tc in m.get("tool_calls") or []:
                 fn = tc.get("function") or {}
