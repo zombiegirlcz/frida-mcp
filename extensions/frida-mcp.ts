@@ -443,9 +443,14 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
         for (const [port, name] of [[DEEPSEEK_PORT, "deepseek-free"],
                                     [QWEN_PORT, "qwen-free"]] as [number, string][]) {
           const r = await getJson(port, "/conversations");
-          lines.push(`${name}: ${r ? `${r.entries} chatu` : "shim nebezi"}`);
-          if (r && Array.isArray(r.sessions)) {
-            for (const s of r.sessions.slice(-5)) lines.push(`   ${String(s).slice(0, 8)}…`);
+          if (!r) {
+            lines.push(`${name}: shim nebezi`);
+            continue;
+          }
+          lines.push(`${name}: ${r.entries} chatu, aktivni pi-session: `
+                     + (r.current ? `${String(r.current).slice(0, 8)}…` : "(neznamá)"));
+          for (const s of (r.sessions ?? []).slice(-5)) {
+            lines.push(`   chat ${String(s).slice(0, 8)}…`);
           }
         }
       } else {
