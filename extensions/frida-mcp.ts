@@ -206,6 +206,24 @@ export function portOpen(port: number, timeoutMs = 1200): Promise<boolean> {
   });
 }
 
+/**
+ * Rekne shimum, ktera pi session je aktivni.
+ *
+ * Diky tomu plati **1 pi session = 1 chat** na strane API:
+ *  - `resume` navaze STEJNY chat (server si drzi kontext, nemusime posilat vse)
+ *  - `new`     zacne chat od znova
+ *  - mapovani se uklada na disk, takze prezije restart shimu
+ */
+export async function tellSession(
+  sessionId: string | undefined,
+  reason: string,
+): Promise<void> {
+  if (!sessionId) return;
+  for (const port of [DEEPSEEK_PORT, QWEN_PORT]) {
+    await postJson(port, "/session", { id: sessionId, reason });
+  }
+}
+
 /** Jednoduchy JSON GET na lokalni shim (null kdyz nebezi). */
 async function getJson(port: number, path: string): Promise<any | null> {
   try {
@@ -354,21 +372,26 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
   })();
 
   // 3) při každé session zkontroluj, že shimy žijí
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (event: any, ctx: any) => {
     try {
       if (bootstrapRunning) {
         // až bootstrap doběhne, dojde k tomu v příští session
         return;
       }
       const py = findPython();
-      if (py && pythonOk(py)) {
-        await startShims(py);
-        // Nova session = nova konverzace. Zapomeneme stare chaty, aby prvni
-        // tah poslal CELY kontext (kdyby se predchozi tah prerusil, delta by
-        // sla do session bez historie a model by "zacal znovu").
-        const n = await resetConversations();
-        if (n) log(`session_start: zapomenuto ${n} chatu -> dalsi tah posle cely kontext`);
+      if (py && pythonOk(py)) await startShims(py);
+
+      // Synchronizace s pi session: jeden pi session = jeden chat.
+      const reason = String(event?.reason ?? "startup");
+      let sid: string | undefined;
+      try {
+        sid = ctx?.sessionManager?.getSessionId?.();
+      } catch {
+        sid = undefined;
       }
+      if (!sid) sid = process.env.PI_SESSION_ID;
+      await tellSession(sid, reason);
+      log(`session_start: reason=${reason} pi-session=${sid ? sid.slice(0, 8) : "?"}…`);
     } catch (e) {
       log(`session_start init selhalo: ${e}`);
     }

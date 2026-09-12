@@ -16,7 +16,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import tempfile  # noqa: E402
+
 from common.convcache import ConvCache, fingerprint  # noqa: E402
+
+
+def new_cache() -> ConvCache:
+    """Izolovana cache — nikdy nesaha na realny logs/convstate.json."""
+    return ConvCache(state_path=os.path.join(tempfile.mkdtemp(), "convstate.json"))
 
 FAILED: list[str] = []
 
@@ -36,7 +43,7 @@ A2 = {"role": "assistant", "content": "Podivam se.",
                       "function": {"name": "bash", "arguments": '{"command":"ls"}'}}]}
 A3 = {"role": "tool", "tool_call_id": "c1", "content": "3"}
 
-c = ConvCache()
+c = new_cache()
 
 # 1) prvni request -> novy chat, posila se vse
 sid, parent, delta = c.lookup([SYS, A1])
@@ -77,7 +84,7 @@ sid, _, delta = c.lookup([SYS, A1, A2])
 check("7. drop -> pristi request je novy chat", sid is None, f"sid={sid}")
 
 # 8) clear() zapomene vsechno -> dalsi request posle CELY kontext
-c2 = ConvCache()
+c2 = new_cache()
 c2.bind([SYS, A1], "chat-X", 2)
 c2.bind(B, "chat-Y", 2)
 n = c2.clear()
@@ -91,6 +98,37 @@ try:
     check("9. prazdny seznam nespadne", True)
 except Exception as e:  # noqa: BLE001
     check("9. prazdny seznam nespadne", False, str(e))
+
+# ---------------------------------------------------------------- pi session
+# 10) ID pi session urcuje chat; prezije "restart" (novy objekt nad stejnym souborem)
+tmp = os.path.join(tempfile.mkdtemp(), "convstate.json")
+c3 = ConvCache(state_path=tmp)
+c3.set_current("pi-session-AAA")
+sid, _, delta = c3.lookup([SYS, A1])
+check("10. s ID session = novy chat", sid is None and len(delta) == 2)
+c3.bind([SYS, A1], "chat-PI", 7)
+
+# "restart shimu": novy objekt, stejny stavovy soubor
+c4 = ConvCache(state_path=tmp)
+c4.set_current("pi-session-AAA", fresh=False)
+sid, parent, delta = c4.lookup([SYS, A1, A2, A3])
+check("11. po restartu navaze STEJNY chat (resume)",
+      sid == "chat-PI" and parent == 7 and len(delta) == 2,
+      f"sid={sid} parent={parent} delta={len(delta)}")
+
+# 12) reason=new zahodi stav -> novy chat
+c4.set_current("pi-session-AAA", fresh=True)
+sid, _, delta = c4.lookup([SYS, A1, A2, A3])
+check("12. reason=new -> novy chat", sid is None and len(delta) == 4,
+      f"sid={sid} delta={len(delta)}")
+
+# 13) jina pi session ma vlastni chat
+c5 = ConvCache(state_path=os.path.join(tempfile.mkdtemp(), "s.json"))
+c5.set_current("pi-session-AAA")
+c5.bind([SYS, A1], "chat-A2", 1)
+c5.set_current("pi-session-BBB")
+sid, _, delta = c5.lookup([SYS, A1, A2, A3])
+check("13. jina pi session = vlastni chat", sid is None, f"sid={sid}")
 
 print()
 if FAILED:

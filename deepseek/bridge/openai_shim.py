@@ -206,6 +206,22 @@ class Handler(BaseHTTPRequestHandler):
         # Reset konverzaci -> pristi request posle CELOU historii v novem chatu.
         # Pouziva se, kdyz se prerusil predchozi tah a delta by sla do session,
         # ktera uz kontext nema (model by "zacal znovu").
+        if self.path.rstrip("/").endswith("/session"):
+            # Synchronizace s pi: extension posila ID pi session, podle ktereho
+            # urcime, ktery chat pouzit (a ktery prezije restart).
+            n = int(self.headers.get("Content-Length", "0") or 0)
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:  # noqa: BLE001
+                body = {}
+            sid = body.get("id") or None
+            reason = body.get("reason") or ""
+            _convs.set_current(sid, fresh=(reason == "new"))
+            print(f"[shim] pi session {str(sid)[:8]}… ({reason or 'n/a'})",
+                  file=sys.stderr)
+            self._json(200, {"ok": True, "session": sid, "reason": reason,
+                             **_convs.stats()})
+            return
         if self.path.rstrip("/").endswith("/reset"):
             st = _convs.stats()
             _convs.clear()

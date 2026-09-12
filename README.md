@@ -194,6 +194,25 @@ pi ─► shim (OpenAI API, stdlib http.server)
 - Flow: `POST /api/v2/chats/new` → `chat_id` → `POST /api/v2/chat/completions?chat_id=…` (SSE).
 - Anonymní režim funguje i bez přihlášení, ale má **denní limit** — přihlášený ne.
 
+### 1 pi session = 1 chat (synchronizace s appkou)
+
+Extension posílá při startu session **ID pi session** na `POST /session`
+(`ctx.sessionManager.getSessionId()`), takže shim přesně ví, který chat
+použít — nemusí hádat podle prefixu zpráv:
+
+| `session_start` reason | co se stane |
+|---|---|
+| `startup` | pokračuje se v uloženém chatu, pokud existuje |
+| `resume` | **naváže se stejný chat** — kontext zůstává na serveru |
+| `new` | chat se začne od znova |
+| `fork` | nová větev |
+
+Mapování `pi session → chat` se **ukládá na disk** (`logs/convstate.json`),
+takže přežije restart shimu i pi. Díky tomu funguje `resume` i po přerušení:
+žádné „začíná znovu bez kontextu".
+
+> Bez ID session (jiný klient) se použije porovnávání prefixu zpráv.
+
 ### Jeden chat na konverzaci + jen delta (proti detekci)
 
 Původně shim vytvářel **nový chat pro každou zprávu** a posílal celou

@@ -134,6 +134,22 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": {"message": "not found"}})
 
     def do_POST(self):  # noqa: N802
+        if self.path.rstrip("/").endswith("/session"):
+            # Synchronizace s pi: extension posila ID pi session, podle ktereho
+            # urcime, ktery chat pouzit (a ktery prezije restart).
+            n = int(self.headers.get("Content-Length", "0") or 0)
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:  # noqa: BLE001
+                body = {}
+            sid = body.get("id") or None
+            reason = body.get("reason") or ""
+            _convs.set_current(sid, fresh=(reason == "new"))
+            print(f"[qwen-shim] pi session {str(sid)[:8]}… ({reason or 'n/a'})",
+                  file=sys.stderr)
+            self._json(200, {"ok": True, "session": sid, "reason": reason,
+                             **_convs.stats()})
+            return
         # Reset konverzaci -> pristi request zalozi novy chat s celou historii.
         if self.path.rstrip("/").endswith("/reset"):
             st = _convs.stats()
