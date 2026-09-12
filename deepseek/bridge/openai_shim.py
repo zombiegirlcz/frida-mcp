@@ -28,8 +28,9 @@ for _p in (_PKG, _REPO):
 
 from bridge.deepseek_api import DeepSeekAPI
 from common.tokenauto import ensure_token
-from common.toolbridge import (StreamSplitter, build_prompt, parse_tool_calls,
-                               to_openai_tool_calls, tool_names)
+from common.toolbridge import (TOOLS_REMINDER, StreamSplitter, build_prompt,
+                               parse_tool_calls, to_openai_tool_calls, tool_names)
+from common.convcache import ConvCache
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN = os.path.join(ROOT, "secrets", "deepseek_token")
@@ -111,14 +112,59 @@ def flatten(messages: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+# Cache konverzaci: drzi jeden chat pro celou konverzaci a posila jen delta.
+# (Puvodne se pro kazdou zpravu vytvarel NOVY chat a posilala se cely historie
+#  znovu — to je napadne a pomale; server si konverzaci drzi sam.)
+_convs = ConvCache()
+
+
+def _delta_prompt(delta: list[dict], has_tools: bool):
+    """Prompt pro dalsi tah v uz existujicim chatu.
+
+    Server uz zna vsechno predchozi, takze posilame jen nove zpravy. Kdyz
+    jsou k dispozici nastroje, pripomeneme, ze plati (bez opakovani schemat).
+    """
+    if has_tools:
+        head = [{"role": "system", "content": TOOLS_REMINDER}]
+    else:
+        head = []
+    return build_prompt(head + delta, None, trailer=True)
+
+
 def complete_stream(body: dict):
-    """Generator textovych chunku — zivi stream z DeepSeeku (nic se nebufferuje)."""
+    """Generator textovych chunku — zivi stream z DeepSeeku (nic se nebufferuje).
+
+    Konverzace se drzi v jednom chatu (viz common/convcache.py): server si
+    pamatuje predchozi tahy, takze posilame jen novou zpravu.
+    """
     _ensure_attached()
     api = get_api()
-    prompt = build_prompt(body.get("messages", []), body.get("tools"))
+    messages = body.get("messages", [])
+    tools = body.get("tools")
+    thinking = bool(body.get("reasoning_effort"))
+
+    session_id, parent_id, delta = _convs.lookup(messages)
+    if session_id:
+        prompt = _delta_prompt(delta, bool(tools))
+        print(f"[shim] delta tah v chatu {session_id[:8]}… "
+              f"({len(delta)} novych zprav, {len(prompt)} znaku)", file=sys.stderr)
+        try:
+            yield from api.completion_stream(session_id, prompt,
+                                             parent_message_id=parent_id,
+                                             thinking_enabled=thinking)
+            _convs.bind(messages, session_id, api.last_response_message_id)
+            return
+        except Exception as e:  # noqa: BLE001
+            print(f"[shim] delta tah selhal ({e}) -> zkusim cely novy chat",
+                  file=sys.stderr)
+            _convs.drop(session_id)
+
+    # novy chat (nebo fallback): cela historie jako jeden prompt
+    prompt = build_prompt(messages, tools)
     session = api.create_session()
-    yield from api.completion_stream(
-        session["id"], prompt, thinking_enabled=bool(body.get("reasoning_effort")))
+    sid = session["id"]
+    yield from api.completion_stream(sid, prompt, thinking_enabled=thinking)
+    _convs.bind(messages, sid, api.last_response_message_id)
 
 
 def complete(body: dict) -> str:

@@ -112,7 +112,12 @@ class DeepSeekAPI:
         return "".join(self.completion_stream(session_id, prompt, **kw))
 
     def completion_stream(self, session_id: str, prompt: str, **kw):
-        """Generator: yields textove chunky, jak prichazeji ze SSE."""
+        """Generator: yields textove chunky, jak prichazeji ze SSE.
+
+        Po dokonceni nastavi `self.last_response_message_id` — to je ID odpovedi,
+        ktere se posila jako `parent_message_id` v dalsim tahu (server si tak drzi
+        kontext konverzace a nemusime posilat celou historii).
+        """
         challenge = self.create_pow_challenge()
         answer = self._solve(challenge)
         hdr = self.pow_header(challenge, answer)
@@ -134,6 +139,7 @@ class DeepSeekAPI:
             data=json.dumps(body).encode(), headers=h, method="POST")
         got = False
         fallback: list[str] = []
+        self.last_response_message_id = None
         with urllib.request.urlopen(req, timeout=180) as r:
             for rawline in r:
                 line = rawline.decode("utf-8", "replace").strip()
@@ -142,6 +148,21 @@ class DeepSeekAPI:
                 if not line.startswith("data:"):
                     fallback.append(line)
                     continue
+                # ID odpovedi (pro navazani dalsiho tahu)
+                if self.last_response_message_id is None:
+                    try:
+                        obj = json.loads(line[5:].strip() or "{}")
+                    except json.JSONDecodeError:
+                        obj = None
+                    if isinstance(obj, dict):
+                        if obj.get("response_message_id"):
+                            self.last_response_message_id = obj["response_message_id"]
+                        else:
+                            v = obj.get("v")
+                            if isinstance(v, dict):
+                                rr = v.get("response") or {}
+                                if rr.get("message_id"):
+                                    self.last_response_message_id = rr["message_id"]
                 c = self._parse_line(line)
                 if c:
                     got = True

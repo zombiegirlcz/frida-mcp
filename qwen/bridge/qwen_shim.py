@@ -30,6 +30,7 @@ for _p in (_PKG, _REPO):
         sys.path.insert(0, _p)
 
 from bridge.qwen_api import DEFAULT_MODEL, QwenAPI, QwenError
+from common.convcache import ConvCache
 from common.toolbridge import (StreamSplitter, build_prompt, parse_tool_calls,
                                to_openai_tool_calls, tool_names)
 
@@ -50,14 +51,40 @@ def has_tool_context(messages: list[dict]) -> bool:
     return any(m.get("role") == "tool" or m.get("tool_calls") for m in messages)
 
 
+# cache konverzaci: jeden chat na konverzaci (viz common/convcache.py)
+_convs = ConvCache()
+
+
 def complete_stream(messages: list[dict], model: str, thinking: bool, tools: list | None):
-    """Generator textovych chunku (zivi stream z Qwenu, nic se nebufferuje)."""
+    """Generator textovych chunku (zivi stream z Qwenu, nic se nebufferuje).
+
+    POZOR: Qwen API bere jen JEDNU zpravu ("Invalid input too many messages")
+    a v `chat_id` si kontext nedrzi, takze historii musime posilat cely jako
+    jeden prompt. Co ale delame: **reuse chat_id** — jeden chat na konverzaci
+    misto noveho chatu pro kazdou zpravu (to je napadne a je to presne to,
+    podle ceho se da automatizace poznat).
+    """
     api = get_api()
-    chat_id = api.new_chat()
+    session_id, _parent, _delta = _convs.lookup(messages)
+    if not session_id:
+        session_id = api.new_chat()
     prompt = build_prompt(messages, tools)
-    for ch in api.completion(chat_id, prompt, model=model, thinking=thinking):
-        if ch["phase"] in ("answer", ""):
-            yield ch["text"]
+    got = False
+    try:
+        for ch in api.completion(session_id, prompt, model=model, thinking=thinking):
+            if ch["phase"] in ("answer", ""):
+                got = True
+                yield ch["text"]
+    except Exception:  # noqa: BLE001
+        # chat uz nemusi existovat / vyprsel -> zaloz novy a zkus znovu
+        _convs.drop(session_id)
+        session_id = api.new_chat()
+        for ch in api.completion(session_id, prompt, model=model, thinking=thinking):
+            if ch["phase"] in ("answer", ""):
+                got = True
+                yield ch["text"]
+    if got:
+        _convs.bind(messages, session_id)
 
 
 def complete(messages: list[dict], model: str, thinking: bool, tools: list | None) -> str:

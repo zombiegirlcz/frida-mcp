@@ -83,6 +83,12 @@ NIKDY sam nevypisuj vysledek nastroje ani dalsi tah. Znacky
 Kdyz je opises, rozbijes konverzaci.
 Po tool callu okamzite skonci — vysledek dostanes v dalsi zprave."""
 
+# Kratka pripominka pro DELTA tahy: schemata nastroju uz server zna z prvniho
+# pozadavku, takze je neposilame znovu — staci rict, ze plati.
+TOOLS_REMINDER = """\
+Nastroje z prvni zpravy teto konverzace plati dal. Kdyz potrebujes nastroj,
+posli tool call ve stejnem formatu (bare JSON nebo <invoke>), nic dalsiho."""
+
 
 def render_tool(tool: dict) -> str:
     fn = tool.get("function") or tool
@@ -101,8 +107,13 @@ def render_tool(tool: dict) -> str:
     return "\n".join(out)
 
 
-def build_prompt(messages: list[dict], tools: list[dict] | None = None) -> str:
-    """OpenAI messages (+tools) -> jeden prompt pro nasi chat API."""
+def build_prompt(messages: list[dict], tools: list[dict] | None = None,
+                 trailer: bool | None = None) -> str:
+    """OpenAI messages (+tools) -> jeden prompt pro nasi chat API.
+
+    trailer: pripojit zaverecnou instrukci. None = automaticky (jen kdyz jsou
+             tools), True = vzdy (pouziva se u delta tahu, kde tools neposilame).
+    """
     tools = tools or []
     schemas = SYSTEM_TOOL_RULES + "\n\n".join(render_tool(t) for t in tools) if tools else ""
     # mapa tool_call_id -> jmeno nastroje (pi u role:tool posila name=None)
@@ -161,7 +172,7 @@ def build_prompt(messages: list[dict], tools: list[dict] | None = None) -> str:
     # Zaverecna instrukce PATRI NA KONEC — tam ji model nejspis poslechne.
     # Bez ni model casto "pokracuje v prepisu": domysli si vysledek nastroje
     # a dalsi tah (v realne session 483x), cimz si otravi vlastni historii.
-    if tools:
+    if trailer is True or (trailer is None and tools):
         parts.append(TURN_TRAILER)
     return "\n\n".join(parts)
 

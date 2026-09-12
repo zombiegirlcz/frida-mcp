@@ -184,6 +184,39 @@ pi ─► shim (OpenAI API, stdlib http.server)
 - Flow: `POST /api/v2/chats/new` → `chat_id` → `POST /api/v2/chat/completions?chat_id=…` (SSE).
 - Anonymní režim funguje i bez přihlášení, ale má **denní limit** — přihlášený ne.
 
+### Jeden chat na konverzaci + jen delta (proti detekci)
+
+Původně shim vytvářel **nový chat pro každou zprávu** a posílal celou
+historii znovu. To je špatně ze dvou důvodů:
+
+1. **Je to nápadné.** Normální uživatel má jeden chat s N zprávami, my jsme
+   měli N chatů s jednou zprávou — přesně podle toho se dá automatizace
+   poznat (a taky se to stalo).
+2. Zbytečně se posílá celý prompt při každém tahu.
+
+Server si konverzaci **drží sám**, jen je potřeba ji správně navázat:
+
+```json
+{"chat_session_id": "<id>", "parent_message_id": "<id poslední odpovědi>"}
+```
+
+Pak stačí poslat **jen novou zprávu**. Ověřeno na živém API — model si
+pamatuje i obsah z předchozích tahů.
+
+`common/convcache.py` to řeší automaticky: porovnává, jestli už tuhle
+konverzaci viděl (prefix zpráv), a když ano, vrátí session + jen delta:
+
+```
+[shim] delta tah v chatu 49ff9183… (2 novych zprav, 785 znaku)
+```
+
+Rozdíl je výrazný — místo celé historie (jednotky KB) se posílá pár set znaků.
+
+> **Qwen**: jeho API bere jen **jednu** zprávu (`Invalid input too many
+> messages`) a kontext v `chat_id` nedrží, takže se historie posílá celá.
+> Ale `chat_id` se **reuse** — jeden chat na konverzaci místo nového pro
+> každou zprávu.
+
 ### Tool calling
 
 Naše backendy neumí nativní function calling, takže `common/toolbridge.py` dělá most:
