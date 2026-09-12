@@ -66,9 +66,13 @@ def complete_stream(messages: list[dict], model: str, thinking: bool, tools: lis
     """
     api = get_api()
     session_id, _parent, _delta = _convs.lookup(messages)
-    if not session_id:
+    fresh = not session_id
+    if fresh:
         session_id = api.new_chat()
     prompt = build_prompt(messages, tools)
+    if fresh:
+        print(f"[qwen-shim] novy chat {session_id[:8]}… (cely kontext: "
+              f"{len(prompt)} znaku, {len(messages)} zprav)", file=sys.stderr)
     got = False
     try:
         for ch in api.completion(session_id, prompt, model=model, thinking=thinking):

@@ -163,6 +163,8 @@ def complete_stream(body: dict):
     prompt = build_prompt(messages, tools)
     session = api.create_session()
     sid = session["id"]
+    print(f"[shim] novy chat {sid[:8]}… (cely kontext: {len(prompt)} znaku, "
+          f"{len(messages)} zprav)", file=sys.stderr)
     yield from api.completion_stream(sid, prompt, thinking_enabled=thinking)
     _convs.bind(messages, sid, api.last_response_message_id)
 
