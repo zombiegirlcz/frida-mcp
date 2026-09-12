@@ -96,6 +96,33 @@ check("```json fence",
       'Zapisuji:\n```json\n{"name": "write", "arguments": {"path": "/t", "content": "x"}}\n```',
       ["write"])
 
+# 11) DSML s fullwidth barem (｜ = U+FF5C) a tagy bez `tool_` prefixu.
+#     Tohle je presny tvar, ktery DeepSeek obcas posle — drive ho splitter
+#     nepoznal a streamoval markup jako text.
+_B = "\uff5c"
+_DSML_RAW = (
+    f"<{_B}DSML{_B} calls>\n"
+    f"<{_B}DSML{_B} invoke name=\"bash\">\n"
+    f"<{_B}DSML{_B} parameter name=\"command\" string=\"true\">ls</{_B}DSML{_B} parameter>\n"
+    f"</{_B}DSML{_B} invoke>\n"
+    f"</{_B}DSML{_B} calls>"
+)
+check("DSML s fullwidth barem (tagy bez tool_)", _DSML_RAW, ["bash"], "")
+
+# 12) a hlavne: StreamSplitter ho nesmi streamovat jako text
+from common.toolbridge import StreamSplitter  # noqa: E402
+sp = StreamSplitter(TOOLS)
+leaked = "".join(sp.feed(c) for c in _DSML_RAW)   # po znacich, jako realny stream
+tail, calls = sp.finish()
+leaked += tail
+_ok = ("DSML" not in leaked and _B not in leaked and "<invoke" not in leaked
+       and [c["name"] for c in calls] == ["bash"])
+if _ok:
+    print("✅ StreamSplitter neleakne DSML markup jako text")
+else:
+    FAILED.append("splitter DSML")
+    print(f"❌ StreamSplitter leaknul markup: {leaked[:90]!r} calls={calls}")
+
 print()
 if FAILED:
     print(f"SELHALO: {len(FAILED)} — {', '.join(FAILED)}")

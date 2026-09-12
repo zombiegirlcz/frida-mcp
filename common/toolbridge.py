@@ -193,7 +193,20 @@ def tool_names(tools: list[dict] | None) -> set[str] | None:
 
 # Znaky, po kterych muze zacit tool call.
 _TRIGGERS = ("<", "{", "`")
-_TRIG_REAL = ("<tool_call", "<tool_calls", "<invoke", "```")
+
+# Co je prokazatelny zacatek tool callu. Pozor: DeepSeek casto pouzije nativni
+# DSML markup `<｜DSML｜...` (｜ = U+FF5C) a jeho tagy byvaji bez `tool_`
+# prefixu (`< calls>`, `< invoke ...>`). Kdyz je splitter nepozna, streamuje
+# je jako text a pi dostane markup misto tool callu.
+_TRIG_REAL = (
+    "<tool_call", "<tool_calls", "<invoke", "```",
+    "<\uff5c", "\uff5cdsml\uff5c", "|dsml|",
+    "< calls>", "<calls>", "< invoke", "<invoke ", "< parameter",
+)
+
+# zkomolene tagy bez `tool_` prefixu (napr. "< calls>", "< invoke name=...")
+_MANGLED_OPEN = re.compile(
+    r"<\s*/?\s*(?:calls|tool_calls|tool_call|invoke|parameter)\b", re.I)
 
 
 class StreamSplitter:
@@ -217,6 +230,9 @@ class StreamSplitter:
     def _is_marker(s: str) -> bool:
         low = s.lower()
         if any(low.startswith(m) for m in _TRIG_REAL):
+            return True
+        # zkomolene tagy bez `tool_` prefixu: "< calls>", "< invoke name=..."
+        if _MANGLED_OPEN.match(s):
             return True
         if s.startswith("{"):
             head = s[:160]
@@ -523,6 +539,11 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None) -> tuple[str
     _jm = re.search(r'\{\s*"name"\s*:', text)
     if calls and _jm:
         text = text[: _jm.start()]
+
+    # odstran CELE bloky tool callu (i s obsahem parametru) — jinak by ve
+    # viditelnem textu zustal treba prikaz z <parameter name="command">ls</parameter>
+    text = re.sub(r"<invoke\b.*?(?:</invoke\s*>|$)", "", text, flags=re.S | re.I)
+    text = re.sub(r"<tool_calls?\b.*?(?:</tool_calls?\s*>|$)", "", text, flags=re.S | re.I)
 
     # 5) uklid obalu, ktere nemaji zustat ve viditelnem textu
     text = _TAG.sub("", text)
