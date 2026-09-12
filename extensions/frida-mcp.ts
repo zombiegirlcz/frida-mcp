@@ -206,6 +206,51 @@ export function portOpen(port: number, timeoutMs = 1200): Promise<boolean> {
   });
 }
 
+/** Jednoduchy JSON GET na lokalni shim (null kdyz nebezi). */
+async function getJson(port: number, path: string): Promise<any | null> {
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}${path}`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Jednoduchy JSON POST na lokalni shim (null kdyz nebezi). */
+async function postJson(port: number, path: string, body?: any): Promise<any | null> {
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+      signal: AbortSignal.timeout(8000),
+    });
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Zapomene zapamatovane chaty na obou shimech -> dalsi tah posle CELOU
+ * historii v novem chatu.
+ *
+ * Volame pri startu kazde pi session: je to bezpecny default. Kdyz se
+ * predchozi tah prerusil (Esc, pad), serverova session uz historii mit
+ * nemusi a delta tah by poslal modelu jen zlomek -> "zacal by znovu".
+ * Plny kontext je vzdy spravne, delta je jen optimalizace.
+ */
+export async function resetConversations(): Promise<number> {
+  let cleared = 0;
+  for (const port of [DEEPSEEK_PORT, QWEN_PORT]) {
+    const r = await postJson(port, "/reset");
+    if (r && r.ok) cleared += Number(r.cleared) || 0;
+  }
+  return cleared;
+}
+
 /** Spustí proces na pozadí; stdout+stderr jde do souboru (kvůli diagnostice). */
 function runDetached(cmd: string, args: string[], logName?: string, cwd = ROOT): void {
   let stdio: any = "ignore";
@@ -316,7 +361,14 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
         return;
       }
       const py = findPython();
-      if (py && pythonOk(py)) await startShims(py);
+      if (py && pythonOk(py)) {
+        await startShims(py);
+        // Nova session = nova konverzace. Zapomeneme stare chaty, aby prvni
+        // tah poslal CELY kontext (kdyby se predchozi tah prerusil, delta by
+        // sla do session bez historie a model by "zacal znovu").
+        const n = await resetConversations();
+        if (n) log(`session_start: zapomenuto ${n} chatu -> dalsi tah posle cely kontext`);
+      }
     } catch (e) {
       log(`session_start init selhalo: ${e}`);
     }
@@ -324,7 +376,7 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
 
   // 4) ruční ovládání: /frida-mcp [status|start|tokens]
   pi.registerCommand("frida-mcp", {
-    description: "frida-mcp: stav providerů, start shimů, refresh tokenů",
+    description: "frida-mcp: status | start | tokens | full-context (reset chatu) | chats",
     handler: async (args: string, ctx: any) => {
       const sub = (args || "status").trim().split(/\s+/)[0];
       const py = findPython();
@@ -339,13 +391,40 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
           ensureTokens(py);
           lines.push("tokeny: spouštím refresh na pozadí (scripts/ensure_tokens.py)");
         } else {
-          lines.push("tokeny: chybí .venv s fridou — spouštím bootstrap");
+          lines.push("tokeny: chybí python — spouštím bootstrap");
           startBootstrap();
         }
       } else if (sub === "start") {
         if (py) lines.push(...(await startShims(py, true)));
-        else lines.push("chybí .venv s fridou — spouštím bootstrap");
+        else lines.push("chybí python — spouštím bootstrap");
         if (!py) startBootstrap();
+      } else if (sub === "full-context" || sub === "full" || sub === "reset"
+                 || sub === "ctx") {
+        // Zahodi zapamatovane chaty -> pristi tah posle CELOU historii v novem
+        // chatu. Pouzij, kdyz se predchozi tah prerusil a model "zacina znovu".
+        let cleared = 0;
+        for (const [port, name] of [[DEEPSEEK_PORT, "deepseek-free"],
+                                    [QWEN_PORT, "qwen-free"]] as [number, string][]) {
+          const r = await postJson(port, "/reset");
+          if (r && r.ok) {
+            cleared += Number(r.cleared) || 0;
+            lines.push(`${name}: chat zapomenut (zruseno ${r.cleared}) -> dalsi tah posle cely kontext`);
+          } else if (r === null) {
+            lines.push(`${name}: shim nebezi (port ${port})`);
+          } else {
+            lines.push(`${name}: reset selhal`);
+          }
+        }
+        lines.push(`hotovo (celkem zruseno ${cleared}). Posli dalsi zpravu.`);
+      } else if (sub === "chats" || sub === "conversations") {
+        for (const [port, name] of [[DEEPSEEK_PORT, "deepseek-free"],
+                                    [QWEN_PORT, "qwen-free"]] as [number, string][]) {
+          const r = await getJson(port, "/conversations");
+          lines.push(`${name}: ${r ? `${r.entries} chatu` : "shim nebezi"}`);
+          if (r && Array.isArray(r.sessions)) {
+            for (const s of r.sessions.slice(-5)) lines.push(`   ${String(s).slice(0, 8)}…`);
+          }
+        }
       } else {
         for (const [port, , name] of [
           [DEEPSEEK_PORT, "", "deepseek-free"],
@@ -355,6 +434,7 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
         }
         lines.push(`python: ${py ?? "nenalezen (spouštím bootstrap)"}`);
         lines.push(`root: ${ROOT}`);
+        lines.push("prikazy: status | start | tokens | full-context | chats");
       }
       const text = lines.join("\n");
       if (ctx?.ui?.notify) ctx.ui.notify(text, "info");

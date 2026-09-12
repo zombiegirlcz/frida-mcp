@@ -118,14 +118,27 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):  # noqa: N802
-        if self.path.rstrip("/").endswith("/models"):
+        p = self.path.rstrip("/")
+        if p.endswith("/models"):
             self._json(200, {"object": "list", "data": [
                 {"id": m, "object": "model", "created": int(time.time()),
-                 "owned_by": "qwen-free(frida)"} for m in MODELS]})
+                 "owned_by": "qwen-free(nativni)"} for m in MODELS]})
+            return
+        if p.endswith("/conversations") or p.endswith("/status"):
+            self._json(200, {"ok": True, **_convs.stats()})
             return
         self._json(404, {"error": {"message": "not found"}})
 
     def do_POST(self):  # noqa: N802
+        # Reset konverzaci -> pristi request zalozi novy chat s celou historii.
+        if self.path.rstrip("/").endswith("/reset"):
+            st = _convs.stats()
+            _convs.clear()
+            print(f"[qwen-shim] reset konverzaci ({st['entries']} zruseno)",
+                  file=sys.stderr)
+            self._json(200, {"ok": True, "cleared": st["entries"],
+                             "next": "full-context"})
+            return
         if not self.path.rstrip("/").endswith("/chat/completions"):
             self._json(404, {"error": {"message": f"unsupported path {self.path}"}})
             return

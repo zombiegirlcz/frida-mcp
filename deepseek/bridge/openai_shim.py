@@ -188,14 +188,30 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):  # noqa: N802
-        if self.path.rstrip("/").endswith("/models"):
+        p = self.path.rstrip("/")
+        if p.endswith("/models"):
             self._json(200, {"object": "list", "data": [
                 {"id": MODEL, "object": "model", "created": int(time.time()),
-                 "owned_by": "deepseek-free(frida)"}]})
+                 "owned_by": "deepseek-free(nativni)"}]})
+            return
+        if p.endswith("/conversations") or p.endswith("/status"):
+            # prehled chatu, ktere si drzime (pro ladani delta tahu)
+            self._json(200, {"ok": True, **_convs.stats()})
             return
         self._json(404, {"error": {"message": "not found"}})
 
     def do_POST(self):  # noqa: N802
+        # Reset konverzaci -> pristi request posle CELOU historii v novem chatu.
+        # Pouziva se, kdyz se prerusil predchozi tah a delta by sla do session,
+        # ktera uz kontext nema (model by "zacal znovu").
+        if self.path.rstrip("/").endswith("/reset"):
+            st = _convs.stats()
+            _convs.clear()
+            print(f"[shim] reset konverzaci ({st['entries']} zruseno) "
+                  f"-> dalsi tah posle cely kontext", file=sys.stderr)
+            self._json(200, {"ok": True, "cleared": st["entries"],
+                             "next": "full-context"})
+            return
         if not self.path.rstrip("/").endswith("/chat/completions"):
             self._json(404, {"error": {"message": f"unsupported path {self.path}"}})
             return

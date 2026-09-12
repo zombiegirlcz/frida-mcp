@@ -76,12 +76,21 @@ c.drop("chat-A")
 sid, _, delta = c.lookup([SYS, A1, A2])
 check("7. drop -> pristi request je novy chat", sid is None, f"sid={sid}")
 
-# 8) prazdny seznam nesmi spadnout
+# 8) clear() zapomene vsechno -> dalsi request posle CELY kontext
+c2 = ConvCache()
+c2.bind([SYS, A1], "chat-X", 2)
+c2.bind(B, "chat-Y", 2)
+n = c2.clear()
+sid, _, delta = c2.lookup([SYS, A1, A2])
+check("8. clear() zapomene chaty (plny kontext)",
+      n == 2 and sid is None and len(delta) == 3, f"n={n} sid={sid} delta={len(delta)}")
+
+# 9) prazdny seznam nesmi spadnout
 try:
     c.lookup([])
-    check("8. prazdny seznam nespadne", True)
+    check("9. prazdny seznam nespadne", True)
 except Exception as e:  # noqa: BLE001
-    check("8. prazdny seznam nespadne", False, str(e))
+    check("9. prazdny seznam nespadne", False, str(e))
 
 print()
 if FAILED:

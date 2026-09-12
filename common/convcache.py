@@ -113,6 +113,17 @@ class ConvCache:
         with self._lock:
             self._entries = [e for e in self._entries if e.session_id != session_id]
 
+    def clear(self) -> int:
+        """Zahodi vsechny konverzace -> dalsi request posle CELY kontext v novem chatu.
+
+        Pouziva se, kdyz se prerusil predchozi tah a delta by sla do session,
+        ktera uz historii nema.
+        """
+        with self._lock:
+            n = len(self._entries)
+            self._entries = []
+            return n
+
     def stats(self) -> dict:
         with self._lock:
             return {"entries": len(self._entries),

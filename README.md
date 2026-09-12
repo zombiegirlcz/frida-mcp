@@ -99,10 +99,20 @@ python3 scripts/ensure_tokens.py       # tokeny z appek
 ### Ovládání z pi
 
 ```
-/frida-mcp            # stav: běží shimy? kde je python? kde je root balíčku?
-/frida-mcp start      # (re)start obou shimů
-/frida-mcp tokens     # znovu vytáhnout tokeny z appek
+/frida-mcp              # stav: běží shimy? kde je python? kde je root balíčku?
+/frida-mcp start        # (re)start obou shimů
+/frida-mcp tokens       # znovu vytáhnout tokeny z appek
+/frida-mcp full-context # ZAPOMENOUT chat -> další tah pošle CELOU historii
+/frida-mcp chats        # kolik chatů si shim drží
 ```
+
+`full-context` použij, když se předchozí tah **přerušil** (Esc, pád, restart
+shimu) a model „začíná znovu" bez kontextu — delta tah by totiž šel do
+session, která už historii nemá. Příkaz řekne shimu, aby zapomněl zapamatované
+chaty, takže další zpráva se pošle jako **nový chat s celou historií**.
+
+Automaticky se to dělá i při **startu každé pi session** (bezpečný default:
+plný kontext je vždy správně, delta je jen optimalizace).
 
 ---
 
