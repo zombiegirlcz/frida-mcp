@@ -177,7 +177,8 @@ def complete_stream(body: dict):
         try:
             yield from api.completion_stream(session_id, prompt,
                                              parent_message_id=parent_id,
-                                             thinking_enabled=thinking)
+                                             thinking_enabled=thinking,
+                                             temperature=body.get("temperature"))
             _convs.bind(messages, session_id, api.last_response_message_id)
             return
         except Exception as e:  # noqa: BLE001
@@ -191,7 +192,8 @@ def complete_stream(body: dict):
     sid = session["id"]
     print(f"[shim] novy chat {sid[:8]}… (cely kontext: {len(prompt)} znaku, "
           f"{len(messages)} zprav)", file=sys.stderr)
-    yield from api.completion_stream(sid, prompt, thinking_enabled=thinking)
+    yield from api.completion_stream(sid, prompt, thinking_enabled=thinking,
+                                    temperature=body.get("temperature"))
     _convs.bind(messages, sid, api.last_response_message_id)
 
 

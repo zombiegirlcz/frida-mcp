@@ -193,6 +193,18 @@ class DeepSeekAPI:
             "thinking_enabled": kw.get("thinking_enabled", False),
             "search_enabled": kw.get("search_enabled", False),
         }
+        # Teplota (API ji respektuje — testovano 0.0 vs 2.0):
+        # Env FRIDA_MCP_TEMPERATURE přepíše default; jinak posíláme 0.3
+        # pro spolehlivost tool-callů místo nekontrolované high-temp.
+        temp = None
+        if "temperature" in kw and kw["temperature"] is not None:
+            temp = kw["temperature"]
+        elif (env := os.environ.get("FRIDA_MCP_TEMPERATURE")) is not None:
+            try: temp = float(env)
+            except ValueError: pass
+        if temp is None:
+            temp = 0.3  # default pro spolehlivost
+        body["temperature"] = temp
         h = dict(self.headers)
         h["Authorization"] = "Bearer " + self.token
         h["Content-Type"] = "application/json"
