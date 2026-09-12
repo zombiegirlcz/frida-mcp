@@ -160,8 +160,7 @@ export function findPython(): string | null {
   for (const p of PY_CANDIDATES) if (existsSync(p)) return p;
   for (const c of PY_PATH_NAMES) {
     try {
-      const r = spawnSyncQuiet(c, ["-c", "import sys;print(sys.version_info[0])"]);
-      if (r === "3") return c;
+      if (spawnSyncQuiet(c, ["-c", "import sys"]) === 0) return c;
     } catch {
       /* zkus dalsi */
     }
@@ -173,12 +172,10 @@ export function findPython(): string | null {
  *  (DeepSeekHashV1 se pocita nativne v C / Pythonu, Qwen WAF hlavicky
  *  nevyzaduje.) */
 function pythonOk(py: string): boolean {
-  try {
-    const r = spawnSyncQuiet(py, ["-c", "import sys;print(sys.version_info[0])"]);
-    return r === "3";
-  } catch {
-    return false;
-  }
+  // POZOR: spawnSyncQuiet vraci EXIT STATUS (cislo), ne stdout!
+  // (driv tu bylo `=== "3"`, coz nikdy neplatilo -> pythonOk() vzdy false
+  //  -> extension jen bootstrapoval a shimy nikdy nenastartovaly)
+  return spawnSyncQuiet(py, ["-c", "import sys"]) === 0;
 }
 
 function venvHasFrida(py: string): boolean {
