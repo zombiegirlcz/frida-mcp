@@ -41,7 +41,12 @@ _pow = None
 
 
 def get_api() -> DeepSeekAPI:
-    """Lazily vytvoří klienta; frida PoW helper se ZKOUSÍ ZNOVU, dokud nechytí."""
+    """Lazily vytvoří klienta.
+
+    PoW se řeší NATIVNĚ (bridge/pow_native.py — DeepSeekHashV1 v C), takže
+    frida ani běžící DeepSeek appka nejsou potřeba. Frida helper se zkouší
+    jen jako záložní cesta, když nativní backend není k dispozici (chybí gcc).
+    """
     global _api, _pow
     with _lock:
         if _api is None:
@@ -51,17 +56,28 @@ def get_api() -> DeepSeekAPI:
                     "a přihlášená? zkus: python3 scripts/ensure_tokens.py)")
             tok = open(TOKEN, encoding="utf-8").read().strip()
             _api = DeepSeekAPI(tok, pow_helper=None)
-        if _pow is None:
+        if _pow is None and _want_frida_fallback():
             try:
                 from bridge.powd import PowHelper
                 p = PowHelper()
                 p.attach()
                 _pow = p
                 _api.pow = p          # doplnit do už vytvořeného klienta
-                print("[shim] frida PoW helper připojen", file=sys.stderr)
+                print("[shim] frida PoW helper připojen (záložní cesta)", file=sys.stderr)
             except Exception as e:  # noqa: BLE001
                 print(f"[shim] frida attach selhal: {e}", file=sys.stderr)
         return _api
+
+
+def _want_frida_fallback() -> bool:
+    """Fridu zkoušet jen když nativní PoW nejde (nebo když si to vynutí env)."""
+    if os.environ.get("ELF_POW_FRIDA"):
+        return True
+    try:
+        from bridge import pow_native
+        return pow_native.lib() is None
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _ensure_attached() -> None:
@@ -220,7 +236,7 @@ def main() -> int:
         print("chybí secrets/deepseek_token", file=sys.stderr)
         return 2
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
-    print(f"[shim] deepseek-free (frida PoW) na http://{a.host}:{a.port}/v1  model={MODEL}",
+    print(f"[shim] deepseek-free (nativni PoW, bez fridy) na http://{a.host}:{a.port}/v1  model={MODEL}",
           flush=True)
     try:
         srv.serve_forever()

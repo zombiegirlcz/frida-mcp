@@ -78,12 +78,34 @@ class DeepSeekAPI:
         return base64.b64encode(json.dumps(obj, separators=(",", ":")).encode()).decode()
 
     def _solve(self, challenge: dict) -> int:
-        if self.pow is None:
-            raise RuntimeError("chybí pow helper (bridge.powd.PowHelper)")
-        ans = self.pow.solve(challenge)
-        if ans < 0:
-            raise RuntimeError(f"PoW nenalezen (answer={ans})")
-        return ans
+        """Vyresi PoW. Preferuje NATIVNI implementaci (bez fridy, bez appky).
+
+        DeepSeekHashV1 = SHA3-256 bez prvniho kola Keccak-f. Viz
+        bridge/pow_native.py (C knihovna, ~5M hash/s -> cely PoW ~0,03 s).
+        """
+        algo = challenge.get("algorithm", "DeepSeekHashV1")
+        if algo == "DeepSeekHashV1":
+            try:
+                from . import pow_native
+                ans = pow_native.solve(
+                    challenge["salt"], challenge["expire_at"],
+                    challenge["challenge"], challenge["difficulty"],
+                )
+                if ans >= 0:
+                    return int(ans)
+            except Exception as e:  # noqa: BLE001
+                # kdyz nativni cesta selze, zkusime jeste legacy frida helper
+                if not getattr(self, "_pow_native_warned", False):
+                    self._pow_native_warned = True
+                    print(f"[pow] nativni reseni selhalo: {e}", flush=True)
+
+        # legacy zpetna kompatibilita: reseni pres fridu v bezici appce
+        if self.pow is not None:
+            ans = self.pow.solve(challenge)
+            if ans >= 0:
+                return ans
+        raise RuntimeError(
+            "PoW se nepodarilo vyresit (nativni backend selhal a frida helper neni)")
 
     def completion(self, session_id: str, prompt: str, **kw) -> str:
         """Odešle prompt a vrátí celou odpověď (spojí stream)."""

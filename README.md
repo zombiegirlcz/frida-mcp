@@ -40,7 +40,7 @@ na `127.0.0.1`.
 
 | provider | model | co se používá z appky |
 |---|---|---|
-| `deepseek-free` | `deepseek-chat` | Bearer token z MMKV + nativní `DeepSeekHashV1` PoW |
+| `deepseek-free` | `deepseek-chat` | Bearer token z MMKV + **nativní `DeepSeekHashV1` PoW** (bez fridy) |
 | `qwen-free` | `qwen3.7-plus`, `qwen3.8-max` | cookie `token` z WebView |
 
 Navíc:
@@ -144,11 +144,25 @@ pi ─► shim (OpenAI API, stdlib http.server)
   deepseek_hash(f"{salt}_{expire_at}_{nonce}") == bytes.fromhex(challenge)
   ```
 
-  `deepseek_hash` je **modifikovaný Keccak** (DeepSeekHashV1) — v `librscrypto.so`.
-  Místo reimplementace voláme **nativní funkci v appce** přes fridu
-  (`deepseek/bridge/powd.py` + `deepseek/agent/pow_rpc.js`).
-- ⚠️ Do `arg1` patří **`expire_at`** z challenge, **ne** aktuální čas (jinak vrátí `-1`).
-- Hlavička `X-DS-PoW-Response` = `base64(JSON{algorithm,challenge,salt,signature,answer,target_path})`.
+  ⚠️ Do vstupu patří **`expire_at`** z challenge, **ne** aktuální čas.
+
+  **`DeepSeekHashV1` = SHA3-256, ale přeskočí první kolo permutace
+  Keccak-f[1600]** (kola 1..23). Vše ostatní je standardní SHA3-256
+  (rate 136, padding `0x06`, 24 RC konstant, 25×64bit stav).
+
+  Implementace je **nativní** (`deepseek/native/dspow.c` + `deepseek/bridge/pow_native.py`)
+  — **frida ani běžící appka nejsou potřeba**:
+
+  ```
+  hash(6fe4581ae0fcf306e50d_1789139155175_35873)
+    = 886a0939c788d0ef9b2ef84e5b98c48494fe2474ea3f62cc5abe036879415a3a   ✅
+  ```
+
+  C knihovna se **zkompiluje sama** při prvním použití (`gcc -O3`, ~0,1 s na
+  cely PoW). Když gcc není, použije se pure-Python fallback (stejný výsledek,
+  jen ~15 s) a teprve pak legacy frida helper.
+
+  Hlavička `X-DS-PoW-Response` = `base64(JSON{algorithm,challenge,salt,signature,answer,target_path})`.
 
 ### Qwen: token + WAF
 
@@ -228,10 +242,12 @@ scripts/
   ensure_tokens.py          tokeny z DeepSeek MMKV + Qwen cookies
 deepseek/
   bridge/deepseek_api.py    API klient (session, PoW, SSE)
-  bridge/powd.py            PoW přes fridu (+ re-attach po pádu appky)
+  bridge/pow_native.py      DeepSeekHashV1 nativně (ctypes + Python fallback)
+  native/dspow.c            C implementace (auto-build při prvním použití)
+  bridge/powd.py            LEGACY: PoW přes fridu (už se nepoužívá)
   bridge/openai_shim.py     OpenAI-compatible server (port 13350)
   bridge/dsui.py, runner.py, bin/frida-chat   most do chatu (accessibility + input)
-  agent/pow_rpc.js          frida agent: nativní DeepSeekHashV1
+  agent/pow_rpc.js          LEGACY: frida agent pro PoW
   cli/deepseek.py           CLI
 qwen/
   bridge/qwen_api.py        API klient (cookie token, WAF hlavičky, SSE)
@@ -268,8 +284,8 @@ vůbec neprovede → `bard/bin/gemini-fix start` (daemon, připojí se na `:sear
 | Qwen: `RateLimited … guest chat limit` | nejsi přihlášený v Qwen appce (anonym má denní limit) |
 | Qwen: vrací HTML s `aliyun_waf_aa` | Qwen aktuálně WAF hlavičky nevyžaduje; když se objeví, zkus `qwen/bin/qwen-free capture` |
 | Qwen: `chybí x-mini-wua` | stará verze kódu — aktualizuj (`pi install git:github.com/zombiegirlcz/frida-mcp`) |
-| `frida attach selhal` | neběží `frida-server` na 27042 → `scripts/deploy_frida_server.sh` |
-| `500: chybí pow helper` | DeepSeek appka neběží → spusť ji |
+| `frida attach selhal` | neškodné: nativní PoW fridu nepotřebuje (frida je jen záložní cesta) |
+| `500: chybí pow helper` | stará verze (před nativním PoW) → aktualizuj balíček |
 | vše je pomalé | zařízení swapuje; zavři appky na pozadí |
 
 ### Diagnostika
