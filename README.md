@@ -40,7 +40,7 @@ na `127.0.0.1`.
 
 | provider | model | co se používá z appky |
 |---|---|---|
-| `deepseek-free` | `deepseek-chat` | Bearer token z MMKV + **nativní `DeepSeekHashV1` PoW** (bez fridy) |
+| `deepseek-free` | `deepseek-chat`, `deepseek-reasoner` | Bearer token z MMKV + **nativní `DeepSeekHashV1` PoW** (bez fridy) |
 | `qwen-free` | `qwen3.7-plus`, `qwen3.8-max` | cookie `token` z WebView |
 
 Navíc:
@@ -193,6 +193,33 @@ pi ─► shim (OpenAI API, stdlib http.server)
   > Qwen funguje i s úplně prázdným `qwen_headers.json`.
 - Flow: `POST /api/v2/chats/new` → `chat_id` → `POST /api/v2/chat/completions?chat_id=…` (SSE).
 - Anonymní režim funguje i bez přihlášení, ale má **denní limit** — přihlášený ne.
+
+### Myšlení (thinking) — `reasoning_content`
+
+DeepSeek appka umí **myšlení** a posílá ho v **jednom SSE streamu** spolu
+s odpovědí. Rozliší se podle typu fragmentu:
+
+| co přijde | typu fragmentu | co s tím |
+|---|---|---|
+| `response/fragments/-1/content` APPEND | `THINK` / `RESPONSE` | text do posledního fragmentu |
+| `response/fragments` APPEND `[{type, content}]` | nový fragment | vzniká při přechodu THINK → RESPONSE |
+| `response/content` APPEND | — | běžné chunky odpovědi |
+
+Myšlení se posílá jako **`delta.reasoning_content`** (to pi zobrazuje jako
+thinking blok), odpověď jako `delta.content`. Tool cally a `StreamSplitter`
+se týkají **jen odpovědi**.
+
+Zapíná se přes `thinking_enabled: true` v requestu na app API; pi to dělá
+automaticky, protože model má `reasoning: true` a
+`compat.thinkingFormat: "deepseek"` → pi pošle `thinking: {type: "enabled"}`.
+
+```bash
+pi --model deepseek-free/deepseek-reasoner    # s myšlením
+pi --model deepseek-free/deepseek-chat        # myšlení dle thinking levelu
+```
+
+Ověřeno na živém API: `6*7` → 147 znaků myšlení + odpověď `42`; tool calling
+funguje i s myšlením.
 
 ### 1 pi session = 1 chat (synchronizace s appkou)
 

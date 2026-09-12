@@ -61,13 +61,18 @@ const COMPAT = {
   supportsFinishReason: true,
 };
 
+// DeepSeek appka ma vlastni mysleni: posila fragmenty typu THINK (mysleni)
+// a RESPONSE (odpoved). pi to umi zobrazit, kdyz model dostane `reasoning: true`
+// a `thinkingFormat: "deepseek"` -> pi posle `thinking: {type: "enabled"}`.
+const COMPAT_THINKING = { ...COMPAT, thinkingFormat: "deepseek" };
+
 export const PROVIDERS: Record<string, Record<string, unknown>> = {
   "deepseek-free": {
     name: "DeepSeek Free (nativni)",
     api: "openai-completions",
     apiKey: "frida",
     baseUrl: `http://127.0.0.1:${DEEPSEEK_PORT}/v1`,
-    compat: COMPAT,
+    compat: COMPAT_THINKING,
     models: [
       {
         id: "deepseek-chat",
@@ -75,7 +80,16 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         input: ["text"],
         contextWindow: 500000,
         maxTokens: 8192,
-        reasoning: false,
+        reasoning: true,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+      {
+        id: "deepseek-reasoner",
+        name: "DeepSeek Reasoner (free, mysleni)",
+        input: ["text"],
+        contextWindow: 500000,
+        maxTokens: 8192,
+        reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       },
     ],

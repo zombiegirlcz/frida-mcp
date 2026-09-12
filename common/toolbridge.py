@@ -436,6 +436,19 @@ _RAW_ARG = re.compile(
 )
 
 
+# Zkomolene zbytky tagu tool callu, ktere model obcas vyplivne do textu
+# (napr. "<_call>", "</function>", "< calls>"). Nesmi se objevit ve vystupu.
+_STRAY_TAG = re.compile(
+    r"<\s*/?\s*[a-z_]{0,12}(?:tool_?calls?|calls?|_call|invoke|parameter|function)\s*>",
+    re.I,
+)
+
+
+def _strip_stray_tags(text: str) -> str:
+    """Odstrani zbytky tagu i ze STREAMOVANEHO textu (delska se po chuncich)."""
+    return _STRAY_TAG.sub("", text)
+
+
 def _find_json_objects(text: str):
     """Najde v textu vsechny vybalancovane JSON objekty {...} (i vic radku)."""
     out = []
@@ -518,6 +531,8 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None) -> tuple[str
     # model obcas odpoved utne uprostred tagu (napr. zbytek "</tool")
     text = re.sub(r"</?(?:tool|call|tool_call|tool_calls|invoke|parameter|function)[a-z_]*\s*$",
                   "", text, flags=re.I)
+    # a ruzne zkomolene zbytky tagu kdekoliv v textu, napr. "<_call>"
+    text = _STRAY_TAG.sub("", text)
 
     return text.strip(), calls
 

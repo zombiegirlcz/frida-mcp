@@ -28,8 +28,9 @@ for _p in (_PKG, _REPO):
 
 from bridge.deepseek_api import DeepSeekAPI
 from common.tokenauto import ensure_token
-from common.toolbridge import (TOOLS_REMINDER, StreamSplitter, build_prompt,
-                               parse_tool_calls, to_openai_tool_calls, tool_names)
+from common.toolbridge import (TOOLS_REMINDER, StreamSplitter, _strip_stray_tags,
+                               build_prompt, parse_tool_calls,
+                               to_openai_tool_calls, tool_names)
 from common.convcache import ConvCache
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -131,6 +132,30 @@ def _delta_prompt(delta: list[dict], has_tools: bool):
     return build_prompt(head + delta, None, trailer=True)
 
 
+def _wants_thinking(body: dict) -> bool:
+    """Pozna z OpenAI requestu, ze ma pi zapnout mysleni.
+
+    pi s `thinkingFormat: "deepseek"` posila `thinking: {type: "enabled"}`.
+    Prijmeme ale i dalsi bezne tvary (reasoning_effort, reasoning.enabled),
+    aby to fungovalo s ruznymi klienty.
+    """
+    t = body.get("thinking")
+    if isinstance(t, dict):
+        if str(t.get("type", "")).lower() in ("enabled", "on", "true"):
+            return True
+        if t.get("enabled") is True:
+            return True
+    elif isinstance(t, str) and t.lower() in ("enabled", "on", "true"):
+        return True
+    r = body.get("reasoning")
+    if isinstance(r, dict) and r.get("enabled") is True:
+        return True
+    eff = body.get("reasoning_effort")
+    if isinstance(eff, str) and eff.lower() not in ("", "none", "off", "disabled"):
+        return True
+    return False
+
+
 def complete_stream(body: dict):
     """Generator textovych chunku — zivi stream z DeepSeeku (nic se nebufferuje).
 
@@ -141,7 +166,7 @@ def complete_stream(body: dict):
     api = get_api()
     messages = body.get("messages", [])
     tools = body.get("tools")
-    thinking = bool(body.get("reasoning_effort"))
+    thinking = _wants_thinking(body)
 
     session_id, parent_id, delta = _convs.lookup(messages)
     if session_id:
@@ -170,7 +195,8 @@ def complete_stream(body: dict):
 
 
 def complete(body: dict) -> str:
-    return "".join(complete_stream(body))
+    """Nestreamovana odpoved — slouci JEN odpoved (bez mysleni)."""
+    return "".join(t for k, t in complete_stream(body) if k == "answer")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -263,11 +289,20 @@ class Handler(BaseHTTPRequestHandler):
             chunk({"role": "assistant", "content": ""})
             sp = StreamSplitter(names)
             try:
-                for piece_in in complete_stream(body):
-                    piece = sp.feed(piece_in)
+                # complete_stream vraci (kind, text): 'think' = mysleni modelu,
+                # 'answer' = odpoved. Mysleni posilame jako `reasoning_content`
+                # (to pi zobrazuje jako thinking blok); tool cally/stream splitter
+                # se tykaji jen odpovedi.
+                for kind, piece_in in complete_stream(body):
+                    if kind == "think":
+                        if piece_in:
+                            chunk({"reasoning_content": piece_in})
+                        continue
+                    piece = _strip_stray_tags(sp.feed(piece_in))
                     if piece:
                         chunk({"content": piece})
                 tail, calls = sp.finish()
+                tail = _strip_stray_tags(tail)
                 if tail:
                     chunk({"content": tail})
                 if calls:

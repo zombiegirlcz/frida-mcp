@@ -33,6 +33,9 @@ BASE_HEADERS = {
 class DeepSeekAPI:
     def __init__(self, token: str, pow_helper=None, device_id: str | None = None):
         self.token = token.strip()
+        # typ posledniho fragmentu — DeepSeek streamuje mysleni (THINK) i odpoved
+        # (RESPONSE) do stejneho chunku, rozlisi se podle typu fragmentu
+        self._last_frag_type = "RESPONSE"
         self.pow = pow_helper
         self.headers = dict(BASE_HEADERS)
         if device_id:
@@ -108,11 +111,66 @@ class DeepSeekAPI:
             "PoW se nepodarilo vyresit (nativni backend selhal a frida helper neni)")
 
     def completion(self, session_id: str, prompt: str, **kw) -> str:
-        """Odešle prompt a vrátí celou odpověď (spojí stream)."""
-        return "".join(self.completion_stream(session_id, prompt, **kw))
+        """Odešle prompt a vrátí celou odpověď (BEZ myšlení, spojí stream)."""
+        return "".join(t for k, t in self.completion_stream(session_id, prompt, **kw)
+                        if k == "answer")
+
+    @staticmethod
+    def _kind(frag_type: str) -> str:
+        """THINK -> 'think', vse ostatni -> 'answer'."""
+        return "think" if (frag_type or "").upper() == "THINK" else "answer"
+
+    def _parse_chunk(self, obj: dict) -> list[tuple[str, str]]:
+        """Jeden SSE objekt -> seznam (kind, text) kde kind je 'think'|'answer'.
+
+        DeepSeek posila mysleni a odpoved v jednom streamu:
+          * `response/fragments/<i>/content` o=APPEND  -> text do posledniho fragmentu
+          * `response/fragments` o=APPEND v=[{type, content}] -> novy fragment
+            (vzniká, kdyz mysleni skonci a zacina odpoved)
+          * `response/content` o=APPEND                 -> bezne chunky odpovedi
+          * {"v": "..."}                                -> kratky tvar
+        """
+        p = obj.get("p")
+        v = obj.get("v")
+        o = obj.get("o")
+        out: list[tuple[str, str]] = []
+
+        # novy fragment (typicky prechod THINK -> RESPONSE)
+        if o == "APPEND" and isinstance(v, list) and (p or "") == "response/fragments":
+            for f in v:
+                if not isinstance(f, dict):
+                    continue
+                self._last_frag_type = f.get("type") or "RESPONSE"
+                if f.get("content"):
+                    out.append((self._kind(self._last_frag_type), f["content"]))
+            return out
+
+        # prirustek textu do posledniho fragmentu
+        if isinstance(p, str) and p.endswith("/content") and o == "APPEND" and isinstance(v, str):
+            return [(self._kind(self._last_frag_type), v)]
+        if isinstance(p, str) and p == "response/content" and o == "APPEND" and isinstance(v, str):
+            return [("answer", v)]
+
+        # kratky tvar {"v": "text"}
+        if isinstance(v, str) and p is None and set(obj.keys()) == {"v"}:
+            return [(self._kind(self._last_frag_type), v)]
+
+        # inicialni stav s celymi fragmenty (obsahuje i prvni kus mysleni)
+        if isinstance(v, dict):
+            resp = v.get("response") or v
+            frags = resp.get("fragments") or []
+            for f in frags:
+                if isinstance(f, dict):
+                    self._last_frag_type = f.get("type") or "RESPONSE"
+                    if f.get("content"):
+                        out.append((self._kind(self._last_frag_type), f["content"]))
+            return out
+        return out
 
     def completion_stream(self, session_id: str, prompt: str, **kw):
-        """Generator: yields textove chunky, jak prichazeji ze SSE.
+        """Generator: yields (kind, text) kde kind je 'think' nebo 'answer'.
+
+        Myersleni (thinking) chodi jako kind='think', odpoved jako 'answer'.
 
         Po dokonceni nastavi `self.last_response_message_id` — to je ID odpovedi,
         ktere se posila jako `parent_message_id` v dalsim tahu (server si tak drzi
@@ -140,6 +198,7 @@ class DeepSeekAPI:
         got = False
         fallback: list[str] = []
         self.last_response_message_id = None
+        self._last_frag_type = "RESPONSE"
         with urllib.request.urlopen(req, timeout=180) as r:
             for rawline in r:
                 line = rawline.decode("utf-8", "replace").strip()
@@ -148,28 +207,29 @@ class DeepSeekAPI:
                 if not line.startswith("data:"):
                     fallback.append(line)
                     continue
-                # ID odpovedi (pro navazani dalsiho tahu)
+                # kazdy data: radek rozparsuj (ID odpovedi + text/mysleni)
+                try:
+                    obj = json.loads(line[5:].strip() or "{}")
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
                 if self.last_response_message_id is None:
-                    try:
-                        obj = json.loads(line[5:].strip() or "{}")
-                    except json.JSONDecodeError:
-                        obj = None
-                    if isinstance(obj, dict):
-                        if obj.get("response_message_id"):
-                            self.last_response_message_id = obj["response_message_id"]
-                        else:
-                            v = obj.get("v")
-                            if isinstance(v, dict):
-                                rr = v.get("response") or {}
-                                if rr.get("message_id"):
-                                    self.last_response_message_id = rr["message_id"]
-                c = self._parse_line(line)
-                if c:
-                    got = True
-                    yield c
+                    if obj.get("response_message_id"):
+                        self.last_response_message_id = obj["response_message_id"]
+                    else:
+                        v0 = obj.get("v")
+                        if isinstance(v0, dict):
+                            rr = v0.get("response") or {}
+                            if rr.get("message_id"):
+                                self.last_response_message_id = rr["message_id"]
+                for kind, text in self._parse_chunk(obj):
+                    if text:
+                        got = True
+                        yield kind, text
         if not got and fallback:
             # endpoint nevratil SSE (napr. chyba) — posli raw, at je videt proc
-            yield "\n".join(fallback)
+            yield "answer", "\n".join(fallback)
 
     def _parse_line(self, line: str) -> str:
         """Vytahne text z jednoho SSE radku (viz _parse_completion)."""
