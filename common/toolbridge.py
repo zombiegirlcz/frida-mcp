@@ -189,6 +189,32 @@ def tool_names(tools: list[dict] | None) -> set[str] | None:
     return names or None
 
 
+def tool_specs(tools: list[dict] | None) -> dict[str, dict] | None:
+    """Popis parametru jednotlivych nastroju.
+
+    Diky tomu pozname i HOLY JSON bez `"name"` — model (hlavne DeepSeek) casto
+    posle jen argumenty a nazev nastroje vynecha:
+        {"command": "cd /neco && ls"}
+    Kdyz vime, ze `command` je parametr nastroje `bash`, dovodime ho.
+    Vraci {jmeno: {"params": {..}, "required": {..}}}.
+    """
+    if not tools:
+        return None
+    out: dict[str, dict] = {}
+    for t in tools:
+        fn = t.get("function") or t
+        name = fn.get("name")
+        if not name:
+            continue
+        schema = fn.get("parameters") or fn.get("input_schema") or {}
+        props = schema.get("properties") or {}
+        out[name] = {
+            "params": set(props.keys()),
+            "required": set(schema.get("required") or []),
+        }
+    return out or None
+
+
 # ------------------------------------------------------------------ stream
 
 # Znaky, po kterych muze zacit tool call.
@@ -219,15 +245,20 @@ class StreamSplitter:
 
     HOLD = 12
 
-    def __init__(self, names: set[str] | None = None):
+    def __init__(self, names: set[str] | None = None,
+                 specs: dict[str, dict] | None = None):
         self.names = names
+        self.specs = specs
+        # vsechna jmena parametru — podle nich poznáme HOLY JSON bez "name"
+        self._params: set[str] = set()
+        for sp in (specs or {}).values():
+            self._params |= set(sp.get("params") or ())
         self.full: list[str] = []
         self.pending = ""
         self.holding = False
         self.emitted: list[str] = []
 
-    @staticmethod
-    def _is_marker(s: str) -> bool:
+    def _is_marker(self, s: str) -> bool:
         low = s.lower()
         if any(low.startswith(m) for m in _TRIG_REAL):
             return True
@@ -235,8 +266,13 @@ class StreamSplitter:
         if _MANGLED_OPEN.match(s):
             return True
         if s.startswith("{"):
-            head = s[:160]
-            return '"name"' in head or "'name'" in head
+            head = s[:200]
+            if '"name"' in head or "'name'" in head:
+                return True
+            # HOLY JSON s argumenty: {"command": "..."} — model vynechal
+            # nazev nastroje. Kdyz je klic znamy parametr, ber to jako marker
+            # (jinak by se prikaz streamoval jako text a tool call by se ztratil).
+            return any(f'"{p}"' in head for p in self._params)
         return False
 
     def feed(self, chunk: str) -> str:
@@ -254,6 +290,13 @@ class StreamSplitter:
             i = self.pending.rfind(c)
             if i > idx:
                 idx = i
+        # POZOR: u RUNU stejnych znaku (``` nebo <<) musime vzit ZACATEK runu.
+        # Jinak se prvni dva backticky hned poslou ven a ve streamu zustane
+        # osirely "```json" — presne to se stavalo u ```json fence.
+        if idx > 0 and self.pending[idx] in _TRIGGERS:
+            while (idx > 0 and self.pending[idx - 1] == self.pending[idx]
+                   and self.pending[idx] in _TRIGGERS):
+                idx -= 1
         if idx == -1:
             # zadny potencialni marker -> vse hned ven
             out, self.pending = self.pending, ""
@@ -279,11 +322,16 @@ class StreamSplitter:
         if not self.holding:
             tail, self.pending = self.pending, ""
             return tail, []
-        text, calls = parse_tool_calls(full, self.names)
+        text, calls = parse_tool_calls(full, self.names, self.specs)
+        # Co uz klient dostal, je SPOLECNY PREFIX. parse_tool_calls text na konci
+        # stripuje, takze presne porovnani selhava (napr. uz odeslane
+        # "Podivam se.\n" vs vracene "Podivam se.") a text by se poslal 2x.
         already = "".join(self.emitted)
-        if text.startswith(already):
-            return text[len(already):], calls
-        return text, calls
+        n = 0
+        m = min(len(already), len(text))
+        while n < m and already[n] == text[n]:
+            n += 1
+        return text[n:], calls
 
 
 # ------------------------------------------------------------------ normalizace
@@ -338,6 +386,36 @@ _FENCE = re.compile(r"```(?:json|tool_call|tool)?\s*(\{.*?\})\s*```", re.S)
 
 # jmena bez ukoncovaci znacky (model casto zapomene </parameter>)
 _PARAM_STOP = re.compile(r"</?\s*(?:parameter|invoke|tool_calls?)\b", re.I)
+
+
+def _infer_tool(obj, specs: dict[str, dict] | None) -> str | None:
+    """Z HOLÉHO JSONu (bez `"name"`) odhadne nastroj podle jmen parametru.
+
+    Prijme se jen tehdy, kdyz se klice daji priradit PRAVE JEDNOMU nastroji
+    (napr. `{"command": ...}` -> bash; `{"path": ...}` je nejednoznacne,
+    protoze path maji read/write/edit -> nevrati nic).
+    """
+    if not specs or not isinstance(obj, dict) or not obj:
+        return None
+    keys = set(obj)
+    hits = []
+    for name, sp in specs.items():
+        params = sp.get("params") or set()
+        required = sp.get("required") or set()
+        if not params or not keys <= params:
+            continue
+        if required and not required <= keys:
+            continue
+        hits.append(name)
+    return hits[0] if len(hits) == 1 else None
+
+
+def _coerce_bare(obj, specs: dict[str, dict] | None) -> dict | None:
+    """HOLY JSON s argumenty (bez `"name"`) -> tool call, pokud se da dovodit."""
+    name = _infer_tool(obj, specs)
+    if not name:
+        return None
+    return {"name": name, "arguments": obj, "_bare": True}
 
 
 def _coerce(obj) -> dict | None:
@@ -498,7 +576,8 @@ def _find_json_objects(text: str):
 
 # znacky, ktere model casto opisuje z promptu do odpovedi
 _LEAK = re.compile(
-    r"^\s*(?:\[(?:VYSLEDEK NASTROJE|TOOL RESULT|ASSISTANT|USER|SYSTEM)[^\]]*\]\s*\n?)+\s*",
+    r"^\s*(?:\[(?:VYSLEDEK NASTROJE|TOOL RESULT|ASSISTANT|USER|SYSTEM"
+    r"|INSTRUKCE PRO TENTO TAH|INSTRUKCE)[^\]]*\]\s*\n?)+\s*",
     re.I,
 )
 
@@ -506,15 +585,39 @@ _LEAK = re.compile(
 # (model si domysli vysledek nastroje nebo cely dalsi tah) — proto text spis
 # odrizneme, nez abychom ho jen vymazali: za markerem nasleduje vymysleny obsah.
 _ECHO = re.compile(
-    r"\[(?:VYSLEDEK NASTROJE|TOOL RESULT|ASSISTANT|USER|SYSTEM)[^\]]*\]", re.I
+    r"\[(?:VYSLEDEK NASTROJE|TOOL RESULT|ASSISTANT|USER|SYSTEM"
+    r"|INSTRUKCE PRO TENTO TAH|INSTRUKCE)[^\]]*\]"
+    # model obcas zacne opisovat nase zaverecne instrukce i bez zavorek
+    r"|Odpovidas jako posledni\b"
+    r"|NIKDY sam nevypisuj\b",
+    re.I,
 )
 
 
-def parse_tool_calls(text: str, tool_names: set[str] | None = None) -> tuple[str, list[dict]]:
+def _strip_bare_json(text: str, specs: dict[str, dict] | None) -> str:
+    """Odstrani z textu HOLY JSON tool call (i s pripadnym ```json obalem)."""
+    out: list[str] = []
+    last = 0
+    for a, b, chunk in _find_json_objects(text):
+        obj = _loads_lenient(chunk)
+        if isinstance(obj, dict) and _infer_tool(obj, specs):
+            out.append(text[last:a])
+            last = b
+    out.append(text[last:])
+    res = "".join(out)
+    # kdyz po odstraneni zustal prazdny kodovy blok, zmizi i on
+    res = re.sub(r"`{3,}\s*(?:json|tool_call|tool)?\s*`{3,}", "", res, flags=re.I)
+    return res
+
+
+def parse_tool_calls(text: str, tool_names: set[str] | None = None,
+                     specs: dict[str, dict] | None = None) -> tuple[str, list[dict]]:
     """Vrati (text_bez_tool_callu, [{'name':..,'arguments':{..}}]).
 
     tool_names: pokud je zadano, prijmou se jen volani techto nastroju
                 (chrani pred falesnymi pozitivy u bezneho JSON v odpovedi).
+    specs:      popis parametru nastroju (viz tool_specs) — umozni poznat
+                i HOLY JSON bez nazvu nastroje.
     """
     text = normalize_dsml(text)
     text = normalize_tags(text)
@@ -530,10 +633,15 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None) -> tuple[str
     cut = _m.start() if _m else len(text)
     visible = text[:cut]
 
-    head_calls = _extract_calls(visible, tool_names)
-    calls = head_calls or _extract_calls(text, tool_names)
+    head_calls = _extract_calls(visible, tool_names, specs)
+    calls = head_calls or _extract_calls(text, tool_names, specs)
 
     text = _LEAK.sub("", visible)
+
+    # HOLY JSON tool call (bez "name") — odstran z viditelneho textu cely objekt,
+    # jinak zustane prikaz videt (a model se podle nej zacne opakovat)
+    if calls and specs and any(c.get("_bare") for c in calls):
+        text = _strip_bare_json(text, specs)
 
     # odstran z viditelneho textu pripadny osirely tool-call JSON
     _jm = re.search(r'\{\s*"name"\s*:', text)
@@ -558,7 +666,8 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None) -> tuple[str
     return text.strip(), calls
 
 
-def _extract_calls(text: str, tool_names: set[str] | None) -> list[dict]:
+def _extract_calls(text: str, tool_names: set[str] | None,
+                  specs: dict[str, dict] | None = None) -> list[dict]:
     """Vytahne vsechna tool volani z textu (vsechny podporovane formaty)."""
     calls: list[dict] = []
 
@@ -584,9 +693,14 @@ def _extract_calls(text: str, tool_names: set[str] | None) -> list[dict]:
     if calls:
         return calls
 
-    # 3) fenced json {"name":..,"arguments":..}
+    # 3) fenced json {"name":..,"arguments":..}  (nebo holy JSON s argumenty)
     for m in _FENCE.finditer(text):
-        c = _coerce(_loads_lenient(m.group(1)))
+        obj = _loads_lenient(m.group(1))
+        c = _coerce(obj)
+        if ok(c):
+            calls.append(c)
+            continue
+        c = _coerce_bare(obj, specs)
         if ok(c):
             calls.append(c)
     if calls:
@@ -597,7 +711,11 @@ def _extract_calls(text: str, tool_names: set[str] | None) -> list[dict]:
     #    Skenujeme az OPRAVENY text: na neescapovanych uvozovkach se jinak
     #    rozsype sledovani string stavu a nenajde se nic.
     for _a, _b, chunk in _find_json_objects(_escape_inner_quotes(text)):
-        c = _coerce(_loads_lenient(chunk))
+        obj = _loads_lenient(chunk)
+        c = _coerce(obj)
+        if not ok(c):
+            # model vynechal nazev nastroje -> dovodime ho z parametru
+            c = _coerce_bare(obj if isinstance(obj, dict) else None, specs)
         if ok(c):
             calls.append(c)
     if calls:

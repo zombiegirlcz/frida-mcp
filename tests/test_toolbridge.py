@@ -14,16 +14,45 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from common.toolbridge import parse_tool_calls  # noqa: E402
+from common.toolbridge import parse_tool_calls, tool_specs  # noqa: E402
 
 TOOLS = {"bash", "read", "write", "edit", "ls", "grep"}
+
+# Skutecne schemas (jmena parametru) — diky nim pozname i HOLY JSON bez "name"
+# (model casto posle jen {"command": "..."} a nazev nastroje vynecha).
+TOOL_SCHEMAS = [
+    {"type": "function", "function": {"name": "bash", "parameters": {
+        "type": "object", "properties": {"command": {"type": "string"}},
+        "required": ["command"]}}},
+    {"type": "function", "function": {"name": "read", "parameters": {
+        "type": "object", "properties": {"path": {"type": "string"}},
+        "required": ["path"]}}},
+    {"type": "function", "function": {"name": "write", "parameters": {
+        "type": "object", "properties": {"path": {"type": "string"},
+                                            "content": {"type": "string"}},
+        "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "edit", "parameters": {
+        "type": "object", "properties": {"path": {"type": "string"},
+                                            "oldText": {"type": "string"},
+                                            "newText": {"type": "string"}},
+        "required": ["path", "oldText", "newText"]}}},
+    {"type": "function", "function": {"name": "ls", "parameters": {
+        "type": "object", "properties": {"path": {"type": "string"}},
+        "required": ["path"]}}},
+    {"type": "function", "function": {"name": "grep", "parameters": {
+        "type": "object", "properties": {"pattern": {"type": "string"},
+                                            "path": {"type": "string"}},
+        "required": ["pattern"]}}},
+]
+SPECS = tool_specs(TOOL_SCHEMAS)
 FAILED: list[str] = []
 
 
 def check(label: str, raw: str, want_calls: list[str], want_text: str | None = None,
           forbid: tuple[str, ...] = ("VYSLEDEK NASTROJE", "[ASSISTANT]", "[USER]",
-                                     "[SYSTEM]", "</call_call>", "<|DSML|")):
-    text, calls = parse_tool_calls(raw, TOOLS)
+                                     "[SYSTEM]", "</call_call>", "<|DSML|"),
+          specs=None):
+    text, calls = parse_tool_calls(raw, TOOLS, SPECS if specs is None else specs)
     got = [c["name"] for c in calls]
     problems = []
     if got != want_calls:
@@ -122,6 +151,54 @@ if _ok:
 else:
     FAILED.append("splitter DSML")
     print(f"❌ StreamSplitter leaknul markup: {leaked[:90]!r} calls={calls}")
+
+# 13) HOLY JSON BEZ "name" — presne to, co model poslal:
+#     ```json
+#     {"command":"cd /root/elf_loader && sed -n '490,540p' src/elf_loader.c"}
+#     ```
+#     Nazev nastroje vynechal; dovodime ho z parametru (command -> bash).
+check("holy JSON ve fence (bez name)",
+      "```json\n{\"command\":\"cd /root/elf_loader && sed -n '490,540p' src/elf_loader.c\"}\n```",
+      ["bash"], "")
+check("holy JSON bez fence (bez name)", '{"command":"ls -la"}', ["bash"], "")
+
+# 14) bezny JSON v odpovedi se NESMI splest s tool callem
+check("bezny JSON v odpovedi", '{"vysledek": 42}', [], '{"vysledek": 42}')
+check("bezny JSON s jinym klicem", 'Souhrn: {"count": 3}', [], 'Souhrn: {"count": 3}')
+
+# 15) StreamSplitter: ```json fence + holy JSON se NESMI streamovat jako text
+from common.toolbridge import StreamSplitter  # noqa: E402
+for _lbl, _raw in (
+    ("splitter: fence + holy JSON", "```json\n{\"command\":\"ls -la\"}\n```"),
+    ("splitter: holy JSON", '{"command":"ls"}'),
+):
+    _sp = StreamSplitter(TOOLS, SPECS)
+    _leak = "".join(_sp.feed(c) for c in _raw)   # po znacich, jako realny stream
+    _tail, _calls = _sp.finish()
+    _leak += _tail
+    if _leak.strip() or [_c["name"] for _c in _calls] != ["bash"]:
+        FAILED.append(_lbl)
+        print(f"❌ {_lbl}: leak={_leak[:60]!r} calls={_calls}")
+    else:
+        print(f"✅ {_lbl}")
+
+# 16) text pred callem se nesmi poslat DVAKRAT (regrese: uz odeslany prefix
+#     vs stripnuty text -> duplikace)
+_sp = StreamSplitter(TOOLS, SPECS)
+_leak = "".join(_sp.feed(c) for c in 'Podivam se.\n{"command":"ls"}')
+_tail, _calls = _sp.finish()
+_leak += _tail
+if _leak.count("Podivam") == 1 and [_c["name"] for _c in _calls] == ["bash"]:
+    print("✅ text pred callem se nezdvojil")
+else:
+    FAILED.append("duplikace textu")
+    print(f"❌ text pred callem: {_leak!r}")
+
+# 17) model opsal nasi zaverecnou instrukci -> nesmi se objevit ve viditelnem textu
+check("ozvena zaverecne instrukce", "Hotovo.\n[INSTRUKCE PRO TENTO TAH]\nOdpovidas jako posledni \"assistant\"",
+      [], "Hotovo.")
+check("ozvena instrukce bez zavorek", "OK\nOdpovidas jako posledni assistant v konverzaci",
+      [], "OK")
 
 print()
 if FAILED:

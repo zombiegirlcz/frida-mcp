@@ -32,6 +32,7 @@ for _p in (_PKG, _REPO):
 from bridge.qwen_api import DEFAULT_MODEL, QwenAPI, QwenError
 from common.convcache import ConvCache
 from common.toolbridge import (StreamSplitter, build_prompt, parse_tool_calls,
+                               tool_specs,
                                to_openai_tool_calls, tool_names)
 
 MODELS = ["qwen3.7-plus", "qwen3.8-max"]
@@ -196,7 +197,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
             emit({"role": "assistant", "content": ""})
-            sp = StreamSplitter(tool_names(tools))
+            sp = StreamSplitter(tool_names(tools), tool_specs(tools))
             try:
                 for piece_in in complete_stream(messages, model, thinking, tools):
                     piece = sp.feed(piece_in)
@@ -230,7 +231,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self._json(500, {"error": {"message": str(e)}})
             return
-        text, calls = parse_tool_calls(text, tool_names(tools))
+        text, calls = parse_tool_calls(text, tool_names(tools), tool_specs(tools))
         msg = {"role": "assistant", "content": text or None}
         if calls:
             msg["tool_calls"] = to_openai_tool_calls(calls)

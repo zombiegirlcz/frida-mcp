@@ -29,6 +29,7 @@ for _p in (_PKG, _REPO):
 from bridge.deepseek_api import DeepSeekAPI
 from common.tokenauto import ensure_token
 from common.toolbridge import (TOOLS_REMINDER, StreamSplitter, _strip_stray_tags,
+                               tool_specs,
                                build_prompt, parse_tool_calls,
                                to_openai_tool_calls, tool_names)
 from common.convcache import ConvCache
@@ -269,6 +270,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.environ["SHIM_DUMP"], "a", encoding="utf-8") as f:
                 f.write(json.dumps(body, ensure_ascii=False) + "\n")
         names = tool_names(body.get("tools"))
+        specs = tool_specs(body.get("tools"))
         cid = "chatcmpl-" + uuid.uuid4().hex[:24]
         created = int(time.time())
 
@@ -287,7 +289,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
             chunk({"role": "assistant", "content": ""})
-            sp = StreamSplitter(names)
+            sp = StreamSplitter(names, specs)
             try:
                 # complete_stream vraci (kind, text): 'think' = mysleni modelu,
                 # 'answer' = odpoved. Mysleni posilame jako `reasoning_content`
@@ -302,6 +304,12 @@ class Handler(BaseHTTPRequestHandler):
                     if piece:
                         chunk({"content": piece})
                 tail, calls = sp.finish()
+                if os.environ.get("SHIM_DUMP"):
+                    with open(os.environ["SHIM_DUMP"] + ".raw", "a", encoding="utf-8") as f:
+                        f.write(json.dumps(
+                            {"stream": True, "raw": "".join(sp.full), "tail": tail,
+                             "calls": [c["name"] for c in calls]},
+                            ensure_ascii=False) + "\n")
                 tail = _strip_stray_tags(tail)
                 if tail:
                     chunk({"content": tail})
@@ -324,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self._json(500, {"error": {"message": str(e), "type": "deepseek_free_error"}})
             return
-        text, calls = parse_tool_calls(text, names)
+        text, calls = parse_tool_calls(text, names, specs)
         if os.environ.get("SHIM_DUMP"):
             with open(os.environ["SHIM_DUMP"] + ".raw", "a", encoding="utf-8") as f:
                 f.write(json.dumps({"parsed_calls": len(calls), "text": text},
