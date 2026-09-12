@@ -110,6 +110,18 @@ t, a = feed([
 check("6. mysleni a odpoved oddelene",
       t == "premyslim dal" and a == "hotovo!", f"t={t!r} a={a!r}")
 
+# 7) REGRESE: druhy chunk odpovedi ma `o` = None (ne "APPEND") a nesmi se ztratit
+t, a = feed([
+    {"v": {"response": {"fragments": [{"id": 2, "type": "THINK", "content": "We"}]}}},
+    {"p": "response/fragments/-1/content", "o": "APPEND", "v": " need"},
+    {"p": "response/fragments", "o": "APPEND",
+     "v": [{"id": 3, "type": "RESPONSE", "content": "RE"}]},
+    {"p": "response/fragments/-1/content", "v": "ASON"},   # <-- zadne "o"!
+    {"p": "response/fragments/-1/content", "v": "ER_OK"},
+])
+check("7. chybejici 'o' u chunku se nesmi ztratit",
+      a == "REASONER_OK" and t == "We need", f"t={t!r} a={a!r}")
+
 print()
 if FAILED:
     print(f"SELHALO: {len(FAILED)} — {', '.join(FAILED)}")

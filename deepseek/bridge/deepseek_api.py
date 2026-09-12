@@ -146,9 +146,14 @@ class DeepSeekAPI:
             return out
 
         # prirustek textu do posledniho fragmentu
-        if isinstance(p, str) and p.endswith("/content") and o == "APPEND" and isinstance(v, str):
+        # POZOR: `o` byva "APPEND", ale casto chybi uplne (None) — nesmime
+        # ho vyzadovat, jinak se kus odpovedi zahodi (presne to se stavalo:
+        # prvni fragment prisel jako RESPONSE "RE", dalsi prisel s o=None
+        # a "ASON" se ztratilo).
+        is_append = o in (None, "APPEND")
+        if isinstance(p, str) and p.endswith("/content") and is_append and isinstance(v, str):
             return [(self._kind(self._last_frag_type), v)]
-        if isinstance(p, str) and p == "response/content" and o == "APPEND" and isinstance(v, str):
+        if isinstance(p, str) and p == "response/content" and is_append and isinstance(v, str):
             return [("answer", v)]
 
         # kratky tvar {"v": "text"}
