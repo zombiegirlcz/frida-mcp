@@ -107,7 +107,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "deepseek-chat",
         name: "DeepSeek Chat (free, nativni PoW)",
         input: ["text"],
-        contextWindow: 500000,
+        contextWindow: 1000000,
         maxTokens: 8192,
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -116,7 +116,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "deepseek-reasoner",
         name: "DeepSeek Reasoner (free, mysleni)",
         input: ["text"],
-        contextWindow: 500000,
+        contextWindow: 1000000,
         maxTokens: 8192,
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -134,7 +134,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "qwen3.7-plus",
         name: "Qwen3.7 Plus (free)",
         input: ["text"],
-        contextWindow: 131072,
+        contextWindow: 1000000,
         maxTokens: 8192,
         reasoning: false,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -143,7 +143,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "qwen3.8-max",
         name: "Qwen3.8 Max (free)",
         input: ["text"],
-        contextWindow: 131072,
+        contextWindow: 1000000,
         maxTokens: 8192,
         reasoning: false,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -260,10 +260,11 @@ export function portOpen(port: number, timeoutMs = 1200): Promise<boolean> {
 export async function tellSession(
   sessionId: string | undefined,
   reason: string,
+  fresh = false,
 ): Promise<void> {
   if (!sessionId) return;
   for (const port of [DEEPSEEK_PORT, QWEN_PORT]) {
-    await postJson(port, "/session", { id: sessionId, reason });
+    await postJson(port, "/session", { id: sessionId, reason, fresh });
   }
 }
 
@@ -483,7 +484,28 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
     }
   });
 
-  // 4) ruční ovládání: /frida-mcp [status|start|tokens]
+  // 4) Kdyz pi zkompaktuje kontext (auto pri prekroceni okna, nebo /compact),
+  //    prestavi se prompty na [summary + par poslednich zprav]. Stara session
+  //    v appce by dostala jen deltu, ktera nedava smysl -> proto pri kompakci
+  //    zahodime chat a dalsi tah posle zkompaktovany kontext do NOVEHO chatu.
+  pi.on("session_compact", async (event: any, ctx: any) => {
+    try {
+      let sid: string | undefined;
+      try {
+        sid = ctx?.sessionManager?.getSessionId?.();
+      } catch {
+        sid = undefined;
+      }
+      if (!sid) sid = process.env.PI_SESSION_ID;
+      const reason = String(event?.reason ?? "compact");
+      await tellSession(sid, `compact:${reason}`, true);
+      log(`session_compact: reason=${reason} -> novy chat v appce (fresh)`);
+    } catch (e) {
+      log(`session_compact selhalo: ${e}`);
+    }
+  });
+
+  // 5) rucni ovladani: /frida-mcp [status|start|tokens]
   pi.registerCommand("frida-mcp", {
     description: "frida-mcp: status | start | tokens | temp <0.0-2.0> | full-context (reset chatu) | chats",
     handler: async (args: string, ctx: any) => {

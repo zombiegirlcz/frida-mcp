@@ -245,11 +245,16 @@ class Handler(BaseHTTPRequestHandler):
                 body = {}
             sid = body.get("id") or None
             reason = body.get("reason") or ""
-            _convs.set_current(sid, fresh=(reason == "new"))
-            print(f"[shim] pi session {str(sid)[:8]}… ({reason or 'n/a'})",
+            # fresh=True se posila pri kompakci: pi prestavi kontext (summary +
+            # par poslednich zprav), takze stara session v appce uz nema smysl —
+            # zahodime ji a dalsi tah posle zkompaktovany kontext do NOVEHO chatu.
+            fresh = bool(body.get("fresh")) or reason == "new"
+            _convs.set_current(sid, fresh=fresh)
+            print(f"[shim] pi session {str(sid)[:8]}… ({reason or 'n/a'}"
+                  f"{' , fresh' if fresh else ''})",
                   file=sys.stderr)
             self._json(200, {"ok": True, "session": sid, "reason": reason,
-                             **_convs.stats()})
+                             "fresh": fresh, **_convs.stats()})
             return
         if self.path.rstrip("/").endswith("/reset"):
             st = _convs.stats()
