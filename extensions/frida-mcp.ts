@@ -140,10 +140,32 @@ const PY_CANDIDATES = [
   join(ROOT, ".venv", "bin", "python"),
   join(ROOT, "deepseek", ".venv", "bin", "python"),
   join(ROOT, "qwen", ".venv", "bin", "python"),
+  "/usr/local/bin/python3",
+  "/usr/bin/python3",
+  "/usr/bin/python",
 ];
 
+/** Jmena v PATH jako posledni zachrana (kdyz zadny venv neexistuje). */
+const PY_PATH_NAMES = ["python3", "python"];
+
+/**
+ * Vrati pouzitelny Python.
+ *
+ * POZOR: od verze s nativnim PoW se .venv uz NEVYTVARI (frida neni potreba),
+ * takze spoléhat jen na `.venv/bin/python` znamenalo, ze po `pi update --all`
+ * (ktery .venv smaze) se shimy prestaly startovat. Proto fallback na systemovy
+ * python z PATH.
+ */
 export function findPython(): string | null {
   for (const p of PY_CANDIDATES) if (existsSync(p)) return p;
+  for (const c of PY_PATH_NAMES) {
+    try {
+      const r = spawnSyncQuiet(c, ["-c", "import sys;print(sys.version_info[0])"]);
+      if (r === "3") return c;
+    } catch {
+      /* zkus dalsi */
+    }
+  }
   return null;
 }
 

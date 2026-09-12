@@ -232,9 +232,16 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=int(os.environ.get("SHIM_PORT", "13350")))
     ap.add_argument("--host", default="127.0.0.1")
     a = ap.parse_args()
-    if not os.path.exists(TOKEN):
-        print("chybí secrets/deepseek_token", file=sys.stderr)
-        return 2
+    # Token se NEVYŽADUJE hned: shim se musí nastartovat i bez něj, aby se pak
+    # na první request sám vytáhl z appky (get_api -> ensure_token). Tvrdý
+    # exit tady znamenal, že po `pi update --all` (který smaže secrets/)
+    # shim vůbec nenaběhl a pi hlásil jen "Connection error."
+    if ensure_token(TOKEN):
+        print("[shim] token je k dispozici", flush=True)
+    else:
+        print("[shim] POZOR: token zatím chybí — vytáhnu ho při prvním requestu "
+              "(je DeepSeek appka nainstalovaná a přihlášená?)", file=sys.stderr,
+              flush=True)
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     print(f"[shim] deepseek-free (nativni PoW, bez fridy) na http://{a.host}:{a.port}/v1  model={MODEL}",
           flush=True)
