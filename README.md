@@ -311,7 +311,7 @@ python3 scripts/ensure_tokens.py --force    # přegeneruj
 python3 scripts/ensure_tokens.py --check    # jen report
 ```
 
-Data appek jsou čitelná jen pod **reálným rootem** → skript používá `sudo`
+Data appek jsou čitelná jen pod **reálným rootem** → skript používá `sudo` **POZOR** toto neplati pro termux proot, použivam na to vlastni aplikaci ktera ma specialni vychytavky https://github.com/zombiegirlcz/kali_core_emulator
 (v proot guestu). Cesty se zkouší postupně (`/mnt/data/data`, `/data/data`, …),
 protože `os.path.exists()` na cizí app data neprojde.
 
