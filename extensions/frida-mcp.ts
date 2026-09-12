@@ -16,7 +16,15 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, openSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { homedir } from "node:os";
@@ -37,7 +45,28 @@ function packageRoot(): string {
 
 const ROOT = packageRoot();
 const MODELS_JSON = join(homedir(), ".pi", "agent", "models.json");
+const CONFIG_JSON = join(ROOT, ".frida-mcp-config.json");
 const LOG_FILE = join(ROOT, "logs", "extension.log");
+
+interface McpConfig {
+  temperature?: number;
+}
+
+function loadConfig(): McpConfig {
+  try { return JSON.parse(readFileSync(CONFIG_JSON, "utf8")); }
+  catch { return {}; }
+}
+
+function saveConfig(cfg: McpConfig): void {
+  writeFileSync(CONFIG_JSON, JSON.stringify(cfg, null, 2));
+}
+
+// Načti uloženou teplotu na startu
+const savedCfg = loadConfig();
+if (savedCfg.temperature !== undefined) {
+  process.env.FRIDA_MCP_TEMPERATURE = String(savedCfg.temperature);
+  log(`načtena uložena teplota: ${savedCfg.temperature}`);
+}
 
 export function log(msg: string): void {
   try {
@@ -324,8 +353,51 @@ export function ensureTokens(py: string): void {
   runDetached(py, [sh]);
 }
 
+/**
+ * Zastavi bezici shimy (deepseek/qwen) skenovanim /proc.
+ *
+ * Zamerne NEpouzivame `pkill -f <pattern>` — prikazova radka samotneho
+ * pkill by pattern obsahovala (a v minulosti to zabilo vlastni shell).
+ * Pres /proc zabijeme presne jen procesy, jejichz cmdline obsahuje
+ * nazev shim skriptu, a nikdy vlastni pid.
+ */
+export function stopShims(): number {
+  let killed = 0;
+  let pids: string[] = [];
+  try {
+    pids = readdirSync("/proc").filter((p) => /^\d+$/.test(p));
+  } catch {
+    return 0;
+  }
+  for (const p of pids) {
+    const pid = Number(p);
+    if (pid === process.pid) continue;
+    let cmd = "";
+    try {
+      cmd = readFileSync(`/proc/${p}/cmdline`, "utf8");
+    } catch {
+      continue; // proces mezitim zmizel
+    }
+    if (cmd.includes("openai_shim.py") || cmd.includes("qwen_shim.py")) {
+      try {
+        process.kill(pid, "SIGKILL");
+        killed++;
+      } catch {
+        /* uz nebezi */
+      }
+    }
+  }
+  return killed;
+}
+
 export async function startShims(py: string, force = false): Promise<string[]> {
   const out: string[] = [];
+  if (force) {
+    const n = stopShims();
+    if (n > 0) out.push(`zastaveno starych shimu: ${n}`);
+    // pockej, nez se uvolni porty
+    await new Promise((r) => setTimeout(r, 1200));
+  }
   const jobs: [number, string, string][] = [
     [DEEPSEEK_PORT, join(ROOT, "deepseek", "bridge", "openai_shim.py"), "deepseek-free"],
     [QWEN_PORT, join(ROOT, "qwen", "bridge", "qwen_shim.py"), "qwen-free"],
@@ -413,7 +485,7 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
 
   // 4) ruční ovládání: /frida-mcp [status|start|tokens]
   pi.registerCommand("frida-mcp", {
-    description: "frida-mcp: status | start | tokens | full-context (reset chatu) | chats",
+    description: "frida-mcp: status | start | tokens | temp <0.0-2.0> | full-context (reset chatu) | chats",
     handler: async (args: string, ctx: any) => {
       const sub = (args || "status").trim().split(/\s+/)[0];
       const py = findPython();
@@ -453,6 +525,32 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
           }
         }
         lines.push(`hotovo (celkem zruseno ${cleared}). Posli dalsi zpravu.`);
+      } else if (sub === "temp" || sub === "temperature") {
+        // Teplota modelu. Appka ma vysoky default (chat), coz zvyraznuje
+        // halucinace; nizsi hodnota (0.2-0.4) dela tool cally spolehlivejsi.
+        // Po zmene se shimy RESTARTUJI, aby se nova hodnota nacetla
+        // (FRIDA_MCP_TEMPERATURE se cte pri startu procesu).
+        const arg = args.trim().split(/\s+/)[1];
+        if (!arg) {
+          lines.push(`pouziti: /frida-mcp temp <hodnota>   (napr. 0.3)`);
+          lines.push(`soucasna teplota: ${process.env.FRIDA_MCP_TEMPERATURE ?? "(default 0.3)"}`);
+        } else {
+          const val = Number.parseFloat(arg);
+          if (Number.isNaN(val) || val < 0 || val > 2) {
+            lines.push(`chybna hodnota: ${arg} (ocekava se 0.0-2.0)`);
+          } else {
+            process.env.FRIDA_MCP_TEMPERATURE = String(val);
+            saveConfig({ ...loadConfig(), temperature: val });
+            lines.push(`teplota = ${val} (ulozeno do .frida-mcp-config.json)`);
+            const py = findPython();
+            if (py) {
+              lines.push(...(await startShims(py, true)));
+              lines.push("shimy restartovany -> nova teplota se nacetla");
+            } else {
+              lines.push("chybi python - restartuj pres /frida-mcp start");
+            }
+          }
+        }
       } else if (sub === "chats" || sub === "conversations") {
         for (const [port, name] of [[DEEPSEEK_PORT, "deepseek-free"],
                                     [QWEN_PORT, "qwen-free"]] as [number, string][]) {
@@ -476,7 +574,7 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
         }
         lines.push(`python: ${py ?? "nenalezen (spouštím bootstrap)"}`);
         lines.push(`root: ${ROOT}`);
-        lines.push("prikazy: status | start | tokens | full-context | chats");
+        lines.push("prikazy: status | start | tokens | temp <0.0-2.0> | full-context | chats");
       }
       const text = lines.join("\n");
       if (ctx?.ui?.notify) ctx.ui.notify(text, "info");

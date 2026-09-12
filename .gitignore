@@ -38,3 +38,4 @@ models.json.bak.frida-mcp
 models.json.tmp.frida-mcp
 test/
 .pi/
+.frida-mcp-config.json
