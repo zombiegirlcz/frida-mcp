@@ -1,82 +1,95 @@
 #!/bin/bash
-# bootstrap.sh — vytvoří Python prostředí s fridou pro frida-mcp.
+# bootstrap.sh — pripravi prostredi pro frida-mcp.
 #
 #   bash scripts/bootstrap.sh
 #
-# Zkouší postupně (první co projde, vyhraje):
-#   1. uv venv + uv pip install      (nejrychlejší, nepotřebuje ensurepip)
-#   2. python3 -m venv + pip
-#   3. python3 -m venv --without-pip + get-pip.py
-#   4. pip3 install --user frida     (krajní případ, bez venv)
+# Od verze s NATIVNIM DeepSeekHashV1 uz NENI potreba frida ani zadna pip
+# knihovna: oba shimy jedou na cistem Pythonu 3.11+ stdlib.
 #
-# Idempotentní: když už frida jde importovat, hned skončí.
+# Co skript dela:
+#   1. overi, ze existuje pouzitelny python3
+#   2. zkompiluje deepseek/native/libdspow.so (gcc/cc/clang) — tim je PoW
+#      hotovy za ~0,1 s misto ~70 s v Pythonu
+#   3. (nepovinne) kdyz je FRIDA_MCP_WITH_FRIDA=1, vytvori .venv s fridou
+#      pro LEGACY cesty (bridge/powd.py, agenti pro bard/, qwen capture)
+#
+# Idempotentni.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="$ROOT/.venv"
 PY="${PYTHON:-python3}"
-FRIDA_VER="${FRIDA_VERSION:-17.18.0}"
+CC_TRY=(gcc cc clang)
 
 log() { echo "[bootstrap] $*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-ok() { [ -x "$1" ] && "$1" -c "import frida" 2>/dev/null; }
+# ---- 1) python ----------------------------------------------------------
+if ! have "$PY"; then
+  log "CHYBA: '$PY' nenalezen. Nainstaluj python3 (3.11+)."
+  exit 1
+fi
+log "python: $("$PY" -c 'import sys;print(sys.executable, sys.version.split()[0])')"
 
-# už hotovo?
-if ok "$VENV/bin/python"; then
-  log "už hotovo: $VENV ($("$VENV/bin/python" -c 'import frida;print(frida.__version__)'))"
+# ---- 2) nativni PoW (C) ------------------------------------------------
+C_SRC="$ROOT/deepseek/native/dspow.c"
+C_SO="$ROOT/deepseek/native/libdspow.so"
+if [ -f "$C_SO" ]; then
+  log "nativni PoW uz je zkompilovany: $C_SO"
+elif [ -f "$C_SRC" ]; then
+  built=0
+  for cc in "${CC_TRY[@]}"; do
+    have "$cc" || continue
+    if "$cc" -O3 -shared -fPIC -o "$C_SO.tmp" "$C_SRC" >/dev/null 2>&1; then
+      mv "$C_SO.tmp" "$C_SO"
+      log "nativni PoW zkompilovan pres '$cc' — cely PoW ~0,1 s"
+      built=1
+      break
+    fi
+  done
+  if [ "$built" = 0 ]; then
+    log "POZOR: zadny C kompilator (gcc/cc/clang) -> PoW pobezi v Pythonu."
+    log "       Je to funkcni, ale pomale (~1-2 min). Instaluj: apt install gcc"
+  fi
+else
+  log "POZOR: chybi $C_SRC — PoW pobezi v Pythonu (pomale)"
+fi
+
+# ---- 3) frida (uz jen nepovinne, pro legacy cesty) ----------------------
+if [ "${FRIDA_MCP_WITH_FRIDA:-0}" != "1" ]; then
+  log "frida se neinstaluje (uz ji nepotrebujeme; FRIDA_MCP_WITH_FRIDA=1 ji vynuti)"
   exit 0
 fi
 
-# ---- 1) uv ---------------------------------------------------------------
+FRIDA_VER="${FRIDA_VERSION:-17.18.0}"
+ok() { [ -x "$1" ] && "$1" -c "import frida" 2>/dev/null; }
+if ok "$VENV/bin/python"; then
+  log "frida uz je: $("$VENV/bin/python" -c 'import frida;print(frida.__version__)')"
+  exit 0
+fi
+
 if have uv; then
-  log "zkouším uv (verze $FRIDA_VER)"
+  log "instaluji fridu $FRIDA_VER pres uv"
   rm -rf "$VENV"
-  if uv venv "$VENV" >/dev/null 2>&1 && \
-     uv pip install --python "$VENV/bin/python" "frida==$FRIDA_VER" >/dev/null 2>&1 && \
-     ok "$VENV/bin/python"; then
-    log "hotovo přes uv: $("$VENV/bin/python" -c 'import frida;print(frida.__version__)')"
-    exit 0
-  fi
-  log "uv cesta nevyšla, zkouším dál"
-fi
-
-# ---- 2/3) stdlib venv ----------------------------------------------------
-if have "$PY"; then
-  log "zkouším $PY -m venv"
-  rm -rf "$VENV"
-  if "$PY" -m venv "$VENV" >/dev/null 2>&1; then
-    :
-  elif "$PY" -m venv --without-pip "$VENV" >/dev/null 2>&1; then
-    log "ensurepip chybí → doinstaluji pip přes get-pip.py"
-    if curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py 2>/dev/null; then
-      "$VENV/bin/python" /tmp/get-pip.py --quiet >/dev/null 2>&1 || true
-    fi
-  fi
-  if [ -x "$VENV/bin/python" ]; then
-    "$VENV/bin/python" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
-    if "$VENV/bin/python" -m pip install --quiet "frida==$FRIDA_VER" >/dev/null 2>&1 \
-       && ok "$VENV/bin/python"; then
-      log "hotovo přes venv: $("$VENV/bin/python" -c 'import frida;print(frida.__version__)')"
-      exit 0
-    fi
-    log "venv cesta nevyšla"
-  fi
-fi
-
-# ---- 4) --user bez venv --------------------------------------------------
-if have pip3; then
-  log "poslední pokus: pip3 install --user frida==$FRIDA_VER"
-  if pip3 install --quiet --user "frida==$FRIDA_VER" >/dev/null 2>&1 \
-     && "$PY" -c "import frida" 2>/dev/null; then
-    log "hotovo do uživatelských balíčků: $("$PY" -c 'import frida;print(frida.__version__)')"
-    log "POZN.: extension používá $PY (bez venv)"
+  if uv venv "$VENV" >/dev/null 2>&1 \
+     && uv pip install --python "$VENV/bin/python" "frida==$FRIDA_VER" >/dev/null 2>&1 \
+     && ok "$VENV/bin/python"; then
+    log "hotovo: $("$VENV/bin/python" -c 'import frida;print(frida.__version__)')"
     exit 0
   fi
 fi
 
-log "CHYBA: nepodařilo se nainstalovat fridu."
-log "Zkus ručně:"
-log "  apt install python3-venv    (nebo python3.13-venv)"
-log "  curl -LsSf https://astral.sh/uv/install.sh | sh"
-exit 1
+if "$PY" -m venv "$VENV" >/dev/null 2>&1 || "$PY" -m venv --without-pip "$VENV" >/dev/null 2>&1; then
+  if [ ! -x "$VENV/bin/pip" ] && have curl; then
+    curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py 2>/dev/null \
+      && "$VENV/bin/python" /tmp/get-pip.py --quiet >/dev/null 2>&1 || true
+  fi
+  "$VENV/bin/python" -m pip install --quiet "frida==$FRIDA_VER" >/dev/null 2>&1 || true
+  if ok "$VENV/bin/python"; then
+    log "hotovo: $("$VENV/bin/python" -c 'import frida;print(frida.__version__)')"
+    exit 0
+  fi
+fi
+
+log "fridu se nepodarilo nainstalovat (nevadi — legacy cesty proste nepujdou)"
+exit 0

@@ -63,7 +63,7 @@ const COMPAT = {
 
 export const PROVIDERS: Record<string, Record<string, unknown>> = {
   "deepseek-free": {
-    name: "DeepSeek Free (frida)",
+    name: "DeepSeek Free (nativni)",
     api: "openai-completions",
     apiKey: "frida",
     baseUrl: `http://127.0.0.1:${DEEPSEEK_PORT}/v1`,
@@ -71,7 +71,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
     models: [
       {
         id: "deepseek-chat",
-        name: "DeepSeek Chat (free, frida)",
+        name: "DeepSeek Chat (free, nativni PoW)",
         input: ["text"],
         contextWindow: 500000,
         maxTokens: 8192,
@@ -81,7 +81,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
     ],
   },
   "qwen-free": {
-    name: "Qwen Free (frida)",
+    name: "Qwen Free (nativni)",
     api: "openai-completions",
     apiKey: "frida",
     baseUrl: `http://127.0.0.1:${QWEN_PORT}/v1`,
@@ -89,7 +89,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
     models: [
       {
         id: "qwen3.7-plus",
-        name: "Qwen3.7 Plus (free, frida)",
+        name: "Qwen3.7 Plus (free)",
         input: ["text"],
         contextWindow: 131072,
         maxTokens: 8192,
@@ -98,7 +98,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
       },
       {
         id: "qwen3.8-max",
-        name: "Qwen3.8 Max (free, frida)",
+        name: "Qwen3.8 Max (free)",
         input: ["text"],
         contextWindow: 131072,
         maxTokens: 8192,
@@ -145,6 +145,18 @@ const PY_CANDIDATES = [
 export function findPython(): string | null {
   for (const p of PY_CANDIDATES) if (existsSync(p)) return p;
   return null;
+}
+
+/** Staci, ze python existuje a umi stdlib — frida uz NENI potreba.
+ *  (DeepSeekHashV1 se pocita nativne v C / Pythonu, Qwen WAF hlavicky
+ *  nevyzaduje.) */
+function pythonOk(py: string): boolean {
+  try {
+    const r = spawnSyncQuiet(py, ["-c", "import sys;print(sys.version_info[0])"]);
+    return r === "3";
+  } catch {
+    return false;
+  }
 }
 
 function venvHasFrida(py: string): boolean {
@@ -206,7 +218,7 @@ export function startBootstrap(): void {
     return;
   }
   bootstrapRunning = true;
-  log("spouštím bootstrap.sh (venv + frida) na pozadí");
+  log("spouštím bootstrap.sh (python + pripadne gcc pro PoW) na pozadí");
   runDetached("bash", [sh], "bootstrap.log");
 }
 
@@ -242,7 +254,7 @@ export async function startShims(py: string, force = false): Promise<string[]> {
 function ensureTokensSandboxed(): void {
   if (bootstrapRunning) return;
   const py = findPython();
-  if (!py || !venvHasFrida(py)) {
+  if (!py || !pythonOk(py)) {
     startBootstrap();
     return;
   }
@@ -271,7 +283,7 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
     try {
       ensureTokensSandboxed();
       const py = findPython();
-      if (py && venvHasFrida(py)) await startShims(py);
+      if (py && pythonOk(py)) await startShims(py);
     } catch (e) {
       log(`background init selhalo: ${e}`);
     }
@@ -285,7 +297,7 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
         return;
       }
       const py = findPython();
-      if (py && venvHasFrida(py)) await startShims(py);
+      if (py && pythonOk(py)) await startShims(py);
     } catch (e) {
       log(`session_start init selhalo: ${e}`);
     }

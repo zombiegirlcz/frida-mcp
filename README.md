@@ -60,7 +60,9 @@ Navíc:
 |---|---|
 | **Zařízení** | Android s **rootem** (Magisk) a **proot guestem** (NetHunter / Parrot), ve kterém běží pi |
 | **Python** | 3.11+ (kvůli venv a fridě) |
-| **frida-server** | běžící na `127.0.0.1:27042` — nasadí `scripts/deploy_frida_server.sh` |
+| **Python** | 3.11+ (shimy jedou na **stdlib** — žádné pip balíčky) |
+| **C kompilátor** | `gcc`/`cc`/`clang` — jen pro rychlý PoW (~0,1 s místo ~70 s) |
+| ~~frida-server~~ | **už není potřeba** — DeepSeekHashV1 se počítá nativně (legacy cesty: `FRIDA_MCP_WITH_FRIDA=1`) |
 | **Cílové appky** | DeepSeek (`com.deepseek.chat`) a/nebo Qwen (`ai.qwenlm.chat.android`), **přihlášené** |
 | **Node** | 20+ (kvůli pi) |
 
@@ -80,8 +82,8 @@ a pi při startu:
 
 1. **zapíše providery** `deepseek-free` a `qwen-free` do `~/.pi/agent/models.json`
    (záloha: `models.json.bak.frida-mcp`)
-2. Pokud chybí Python prostředí, spustí `scripts/bootstrap.sh`
-   (vytvoří `.venv` a nainstaluje `frida==17.18.0`)
+2. Spustí `scripts/bootstrap.sh` — ověří Python a **zkompiluje nativní PoW**
+   (`deepseek/native/libdspow.so`). Žádné pip balíčky se neinstalují.
 3. **vytáhne tokeny** z appek, když chybí (`scripts/ensure_tokens.py`)
 4. **nastartuje shimy** na portech 13350 / 13360
 

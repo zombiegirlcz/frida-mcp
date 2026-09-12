@@ -166,6 +166,42 @@ def deepseek_hash(data: bytes) -> bytes:
     return deepseek_hash_py(data)
 
 
+def _py_worker(args):
+    prefix, target, lo, hi = args
+    h = deepseek_hash_py
+    for n in range(lo, hi):
+        if h(prefix + str(n).encode()) == target:
+            return n
+    return -1
+
+
+def _solve_py(prefix: bytes, target: bytes, difficulty: int, start: int = 0) -> int:
+    """Rozdeli rozsah noncu mezi jadra (Python je pomaly, tohle pomuze ~N×)."""
+    import multiprocessing as mp
+
+    cpus = min(os.cpu_count() or 1, 16)
+    if cpus <= 1 or difficulty - start < 4096:
+        return _py_worker((prefix, target, start, difficulty))
+
+    step = max(1, (difficulty - start) // cpus)
+    jobs = []
+    lo = start
+    while lo < difficulty:
+        hi = min(lo + step, difficulty)
+        jobs.append((prefix, target, lo, hi))
+        lo = hi
+    try:
+        with mp.Pool(len(jobs)) as pool:
+            for r in pool.imap_unordered(_py_worker, jobs):
+                if r >= 0:
+                    pool.terminate()
+                    return r
+            return -1
+    except Exception:  # noqa: BLE001
+        # multiprocessing nemusi fungovat (proot, restricted) -> Sekvencne
+        return _py_worker((prefix, target, start, difficulty))
+
+
 def solve(salt: str, expire_at, challenge_hex: str, difficulty: int,
           start: int = 0) -> int:
     """Najde nonce, pro ktery hash(f"{salt}_{expire_at}_{nonce}") == challenge.
@@ -184,11 +220,7 @@ def solve(salt: str, expire_at, challenge_hex: str, difficulty: int,
         ans = h.deepseek_solve(prefix, len(prefix), target, difficulty, start)
         return int(ans)
 
-    # fallback: pure Python
-    for n in range(start, difficulty):
-        if deepseek_hash_py(prefix + str(n).encode()) == target:
-            return n
-    return -1
+    return _solve_py(prefix, target, difficulty, start)
 
 
 def backend() -> str:
