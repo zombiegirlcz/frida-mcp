@@ -23,6 +23,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { readFile, rename, writeFile } from "node:fs/promises";
@@ -354,6 +355,54 @@ export function ensureTokens(py: string): void {
   runDetached(py, [sh]);
 }
 
+// Cesty k tokenum (klon i dev repo si je drzi zvlast)
+const DEEPSEEK_TOKEN_FILE = join(ROOT, "deepseek", "secrets", "deepseek_token");
+const QWEN_TOKEN_FILE = join(ROOT, "qwen", "secrets", "qwen_token");
+
+/**
+ * Vynuti obnovu tokenu: smaze stary token + cache a teprve pak vytahne novy.
+ *
+ * Proc mazat: `ensure_tokens.py` bez `--force` preskoci token mladsi 12 h,
+ * takze po prenuti uctu v appce zustane stary (neplatny) token. Smazanim
+ * zarucime, ze se opravdu nacte novy. A protoze shim drzi klienta v `_api`
+ * cache, po obnove tokenu RESTARTUJEME shimy — jinak by porad pouzivaly
+ * stary token z pameti.
+ */
+export async function refreshTokens(py: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const f of [DEEPSEEK_TOKEN_FILE, QWEN_TOKEN_FILE]) {
+    try {
+      unlinkSync(f);
+      out.push(`smazán starý ${f.split("/").slice(-2).join("/")}`);
+    } catch {
+      /* neexistoval */
+    }
+  }
+  const sh = join(ROOT, "scripts", "ensure_tokens.py");
+  if (!existsSync(sh)) {
+    out.push("chybí scripts/ensure_tokens.py");
+    return out;
+  }
+  runDetached(py, [sh, "--force"], "tokens.log");
+  // pockame, az se novy token objevi (appka ho musi mit zapsany v MMKV)
+  const t0 = Date.now();
+  while (Date.now() - t0 < 90000) {
+    if (existsSync(DEEPSEEK_TOKEN_FILE)) break;
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  if (existsSync(DEEPSEEK_TOKEN_FILE)) {
+    const peek = readFileSync(DEEPSEEK_TOKEN_FILE, "utf8").trim().slice(0, 12);
+    out.push(`nový token načten z appky (${peek}…)`);
+  } else {
+    out.push("token se nepodařilo načíst — koukej do logs/tokens.log "
+             + "(je appka přihlášená? je vidět v MMKV?)");
+  }
+  // restart shimu -> zahodi cache klienta se starym tokenem
+  out.push(...(await startShims(py, true)));
+  out.push("shimy restartovány s novým tokenem");
+  return out;
+}
+
 /**
  * Zastavi bezici shimy (deepseek/qwen) skenovanim /proc.
  *
@@ -519,8 +568,8 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
       }
       if (sub === "tokens") {
         if (py) {
-          ensureTokens(py);
-          lines.push("tokeny: spouštím refresh na pozadí (scripts/ensure_tokens.py)");
+          lines.push("tokeny: VYNUCENÁ obnova (smažu starý token + cache)");
+          lines.push(...(await refreshTokens(py)));
         } else {
           lines.push("tokeny: chybí python — spouštím bootstrap");
           startBootstrap();
