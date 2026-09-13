@@ -17,6 +17,45 @@ import urllib.request
 
 BASE = "https://chat.deepseek.com"
 
+# Biznisove kody, ktere znamenaji "neplatny/neprihlaseny token" -> staci
+# obnovit token a zkusit znovu (nikoliv trvat error).
+AUTH_BIZ_CODES = {40001, 40004, 40008, 40009, 40011, 40013, 40301, 40302}
+
+
+class DeepSeekError(RuntimeError):
+    """Chyba od DeepSeek API (neplatny token, rate limit, invalid message...).
+
+    Rozsirene o `biz_code` a `retry` (zda staci obnovit token a zkusit znovu).
+    """
+
+    def __init__(self, msg: str, biz_code: int | None = None, retry: bool = False):
+        super().__init__(msg)
+        self.biz_code = biz_code
+        self.retry = retry
+
+    @staticmethod
+    def from_resp(resp: dict, what: str) -> "DeepSeekError | None":
+        """Pokud odpoved obsahuje chybu, vratime DeepSeekError, jinak None."""
+        data = resp.get("data")
+        biz_code = data.get("biz_code") if isinstance(data, dict) else None
+        biz_msg = data.get("biz_msg") if isinstance(data, dict) else None
+        code = resp.get("code")
+        if (biz_code not in (None, 0)) or (code not in (None, 0)):
+            msg = biz_msg or resp.get("msg") or f"code={code}"
+            # kod chyby byva bud v code (top-level) nebo v data.biz_code
+            err_code = biz_code if biz_code not in (None, 0) else code
+            low = str(msg).lower()
+            # auth chyby: staci obnovit token a zkusit znovu
+            retry = (
+                err_code in AUTH_BIZ_CODES
+                or str(err_code).startswith("4000")
+                or any(k in low for k in ("invalid token", "authorization failed",
+                                          "unauthorized", "not logged", "login"))
+            )
+            return DeepSeekError(f"{what}: {msg}", biz_code=err_code, retry=retry)
+        return None
+
+
 # Hlavičky odchycené z reálné appky (DeepSeek/2.5.0)
 BASE_HEADERS = {
     "User-Agent": "DeepSeek/2.5.0 Android/33",
@@ -61,8 +100,18 @@ class DeepSeekAPI:
 
     def create_session(self) -> dict:
         r = self._req("POST", "/api/v0/chat_session/create", {})
-        bd = r.get("data", {}).get("biz_data", r)
-        return bd.get("chat_session", bd)
+        err = DeepSeekError.from_resp(r, "chat_session/create")
+        if err:
+            raise err  # chyba od API (napr. neplatny token)
+        data = r.get("data")
+        # `data` muze byt None pri chybe — osetrit, jinak .get() spadne
+        if not isinstance(data, dict):
+            raise DeepSeekError("chat_session/create: neocekavana odpoved: " + str(r)[:160])
+        bd = data.get("biz_data") or r
+        chat = bd.get("chat_session") if isinstance(bd, dict) else None
+        if not chat:
+            raise DeepSeekError("chat_session/create: zadny chat_session: " + str(r)[:160])
+        return chat
 
     def create_pow_challenge(self, target_path="/api/v0/chat/completion") -> dict:
         r = self._req("POST", "/api/v0/chat/create_pow_challenge",
@@ -244,9 +293,25 @@ class DeepSeekAPI:
                     if text:
                         got = True
                         yield kind, text
-        if not got and fallback:
-            # endpoint nevratil SSE (napr. chyba) — posli raw, at je videt proc
-            yield "answer", "\n".join(fallback)
+        if not got:
+            # nic neseznamene -> hledej chybove JSON v fallback
+            for line in fallback:
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(o, dict):
+                    err = DeepSeekError.from_resp(o, "chat/completion")
+                    if err:
+                        raise err
+            # nejsou tam chybove JSON, jen control events (event: ready/hint/close)
+            # -> pravdepodobne auth/token problem
+            raise DeepSeekError(
+                "chat/completion: prazdna odpoved (zadne data:), "
+                "pravdepodobne neplatny token nebo limit. "
+                "Zkus: /frida-mcp tokens",
+                retry=True
+            )
 
     def _parse_line(self, line: str) -> str:
         """Vytahne text z jednoho SSE radku (viz _parse_completion)."""

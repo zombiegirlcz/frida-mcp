@@ -32,6 +32,7 @@ from common.toolbridge import (TOOLS_REMINDER, StreamSplitter, _strip_stray_tags
                                tool_specs,
                                build_prompt, parse_tool_calls,
                                to_openai_tool_calls, tool_names)
+from deepseek.bridge.deepseek_api import DeepSeekError
 from common.convcache import ConvCache
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -162,12 +163,42 @@ def complete_stream(body: dict):
 
     Konverzace se drzi v jednom chatu (viz common/convcache.py): server si
     pamatuje predchozi tahy, takze posilame jen novou zpravu.
+
+    Pri auth chybe (DeepSeekError.retry) -> zkusime refresh token + 1 retry.
     """
+    def _try_stream(api, session_id, prompt, parent_id, thinking, temp):
+        """Zkus stream, pri DeepSeekError.retry -> refresh token + retry jednou."""
+        for attempt in range(2):
+            try:
+                yield from api.completion_stream(session_id, prompt,
+                                                 parent_message_id=parent_id,
+                                                 thinking_enabled=thinking,
+                                                 temperature=temp)
+                _convs.bind(messages, session_id, api.last_response_message_id)
+                return
+            except DeepSeekError as e:
+                if not e.retry or attempt == 1:
+                    raise
+                # auth chyba -> force-refresh token + zkousime znovu
+                print(f"[shim] auth chyba ({e}), force-refresh token + retry {attempt+1}/2",
+                      file=sys.stderr)
+                if not ensure_token(TOKEN, force=True):
+                    raise
+                # precteme novy token a zkusime znovu
+                global _api
+                with _lock:
+                    _api = None
+                api = get_api()  # precte novy token
+                continue
+            except Exception:  # jina chyba -> nezkousej znovu
+                raise
+
     _ensure_attached()
     api = get_api()
     messages = body.get("messages", [])
     tools = body.get("tools")
     thinking = _wants_thinking(body)
+    temp = body.get("temperature")
 
     session_id, parent_id, delta = _convs.lookup(messages)
     if session_id:
@@ -175,11 +206,7 @@ def complete_stream(body: dict):
         print(f"[shim] delta tah v chatu {session_id[:8]}… "
               f"({len(delta)} novych zprav, {len(prompt)} znaku)", file=sys.stderr)
         try:
-            yield from api.completion_stream(session_id, prompt,
-                                             parent_message_id=parent_id,
-                                             thinking_enabled=thinking,
-                                             temperature=body.get("temperature"))
-            _convs.bind(messages, session_id, api.last_response_message_id)
+            yield from _try_stream(api, session_id, prompt, parent_id, thinking, temp)
             return
         except Exception as e:  # noqa: BLE001
             print(f"[shim] delta tah selhal ({e}) -> zkusim cely novy chat",
@@ -192,8 +219,12 @@ def complete_stream(body: dict):
     sid = session["id"]
     print(f"[shim] novy chat {sid[:8]}… (cely kontext: {len(prompt)} znaku, "
           f"{len(messages)} zprav)", file=sys.stderr)
-    yield from api.completion_stream(sid, prompt, thinking_enabled=thinking,
-                                    temperature=body.get("temperature"))
+    try:
+        yield from _try_stream(api, sid, prompt, None, thinking, temp)
+    except Exception as e:  # noqa: BLE001
+        print(f"[shim] novy chat taky selhal ({e})", file=sys.stderr)
+        raise
+
     _convs.bind(messages, sid, api.last_response_message_id)
 
 

@@ -26,16 +26,19 @@ def _has(path: str) -> bool:
         return False
 
 
-def ensure_token(token_path: str, timeout: int = 240) -> bool:
-    """Zajistí, že token_path existuje a není prázdný. Když ne, zkusí ho vytáhnout."""
-    if _has(token_path):
+def ensure_token(token_path: str, timeout: int = 240, force: bool = False) -> bool:
+    """Zajistí, že token_path existuje a není prázdný. Když ne (nebo force=True),
+    zkusí ho vytáhnout z appky (i když je starsí než 12h, protože uživatel může
+    přepnout účet a starý token už neplatí)."""
+    if _has(token_path) and not force:
         return True
     if not os.path.exists(SCRIPT):
         print(f"[tokenauto] {SCRIPT} nenalezen", file=sys.stderr)
         return False
     print(f"[tokenauto] token {token_path} chybí -> vytahuji z appky", file=sys.stderr)
     try:
-        r = subprocess.run([sys.executable, SCRIPT], timeout=timeout,
+        cmd = [sys.executable, SCRIPT] + (["--force"] if force else [])
+        r = subprocess.run(cmd, timeout=timeout,
                            capture_output=True, text=True)
         if r.stdout:
             for line in r.stdout.strip().splitlines():
