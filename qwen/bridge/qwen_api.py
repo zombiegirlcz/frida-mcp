@@ -193,7 +193,7 @@ class QwenAPI:
 
     def completion(self, chat_id: str, prompt: str, model: str | None = None,
                    thinking: bool = False, search: bool = False, timeout: float = 120):
-        """Generator: {'phase': 'answer'|'thinking_summary', 'text': str}."""
+        """Generator: {'phase': 'think'|'answer'|'', 'text': str}."""
         m = model or self.model
         ts = int(time.time())
         body = {
@@ -201,9 +201,13 @@ class QwenAPI:
             "chat_mode": "guest", "model": m,
             "messages": [{
                 "chat_type": "t2t", "content": prompt, "role": "user",
+                # POZOR (overeno na zivem API):
+                #   thinking_format="summary"                    -> jen 'answer'
+                #   thinking_format="full" + auto_thinking=True   -> 'think' + 'answer'
+                # Faze mysleni se pak jmenuje "think" (ne "thinking_summary").
                 "feature_config": {
                     "output_schema": "phase", "thinking_enabled": bool(thinking),
-                    "thinking_format": "summary", "auto_thinking": False,
+                    "thinking_format": "full", "auto_thinking": bool(thinking),
                     "auto_search": bool(search),
                 },
                 "timestamp": ts, "sub_chat_type": "t2t", "models": [m],

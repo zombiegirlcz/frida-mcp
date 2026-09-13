@@ -132,7 +132,7 @@ def complete_stream(messages: list[dict], model: str, thinking: bool, tools: lis
             txt = ch.get("text") or ""
             if not txt:
                 continue
-            if (ch.get("phase") or "") == "thinking_summary":
+            if (ch.get("phase") or "") in ("think", "thinking_summary"):
                 yield "think", txt
             else:
                 yield "answer", txt
