@@ -129,7 +129,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
     api: "openai-completions",
     apiKey: "frida",
     baseUrl: `http://127.0.0.1:${QWEN_PORT}/v1`,
-    compat: COMPAT,
+    compat: COMPAT_THINKING,
     models: [
       {
         id: "qwen3.7-plus",
@@ -137,7 +137,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         input: ["text"],
         contextWindow: 1000000,
         maxTokens: 8192,
-        reasoning: false,
+        reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       },
       {
@@ -146,7 +146,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         input: ["text"],
         contextWindow: 1000000,
         maxTokens: 8192,
-        reasoning: false,
+        reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       },
     ],

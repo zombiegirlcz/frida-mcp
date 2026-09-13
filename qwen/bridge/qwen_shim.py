@@ -56,6 +56,56 @@ def has_tool_context(messages: list[dict]) -> bool:
 _convs = ConvCache()
 
 
+# Qwen bere CELOU historii v JEDNOM promptu. U velkych session to prekroci
+# limit API, nebo to trva dele nez timeout -> pi jen visi na "working" a nic
+# neprijde. Proto prompt orezavame (drzime system + nejnovejsi zpravy).
+MAX_PROMPT_CHARS = int(os.environ.get("QWEN_MAX_PROMPT", "300000"))
+
+
+def _cap_messages(messages: list[dict], limit: int | None = None):
+    """Vrati (zpravy, zkraceno?). Drzi prvni system zpravu + nejnovejsi zpravy."""
+    limit = limit or MAX_PROMPT_CHARS
+    def _size(m):
+        c = m.get("content")
+        return len(c) if isinstance(c, str) else len(str(c or ""))
+    total = sum(_size(m) for m in messages)
+    if total <= limit:
+        return messages, False
+    sys_msg = [m for m in messages if m.get("role") == "system"][:1]
+    rest = [m for m in messages if m.get("role") != "system"]
+    keep, used = [], 0
+    for m in reversed(rest):
+        ln = _size(m)
+        if keep and used + ln > limit:
+            break
+        keep.append(m)
+        used += ln
+    keep.reverse()
+    return sys_msg + keep, True
+
+
+def _wants_thinking(body: dict) -> bool:
+    """Pozna, zda klient (pi) chce mysleni.
+
+    pi posila pri `compat.thinkingFormat` pole `thinking` a/nebo
+    `reasoning_effort`; ruzne verze se lisi, proto kontrolujeme vsechno.
+    """
+    th = body.get("thinking")
+    if isinstance(th, dict) and th.get("type") == "enabled":
+        return True
+    if isinstance(th, bool) and th:
+        return True
+    if body.get("thinking_enabled") is True:
+        return True
+    r = body.get("reasoning")
+    if isinstance(r, dict) and r.get("enabled") is True:
+        return True
+    eff = body.get("reasoning_effort")
+    if isinstance(eff, str) and eff.lower() not in ("", "none", "off", "disabled"):
+        return True
+    return False
+
+
 def complete_stream(messages: list[dict], model: str, thinking: bool, tools: list | None):
     """Generator textovych chunku (zivi stream z Qwenu, nic se nebufferuje).
 
@@ -66,28 +116,39 @@ def complete_stream(messages: list[dict], model: str, thinking: bool, tools: lis
     podle ceho se da automatizace poznat).
     """
     api = get_api()
+    messages, trimmed = _cap_messages(messages)
     session_id, _parent, _delta = _convs.lookup(messages)
     fresh = not session_id
     if fresh:
         session_id = api.new_chat()
     prompt = build_prompt(messages, tools)
-    if fresh:
-        print(f"[qwen-shim] novy chat {session_id[:8]}… (cely kontext: "
-              f"{len(prompt)} znaku, {len(messages)} zprav)", file=sys.stderr)
+    print(f"[qwen-shim] chat {session_id[:8]}… (kontext: {len(prompt)} znaku, "
+          f"{len(messages)} zprav{', ZKRACENO' if trimmed else ''})", file=sys.stderr)
     got = False
+
+    def _run(sid):
+        """Preklad faze Qwenu na (kind, text); mysleni jde jako 'think'."""
+        for ch in api.completion(sid, prompt, model=model, thinking=thinking):
+            txt = ch.get("text") or ""
+            if not txt:
+                continue
+            if (ch.get("phase") or "") == "thinking_summary":
+                yield "think", txt
+            else:
+                yield "answer", txt
+
     try:
-        for ch in api.completion(session_id, prompt, model=model, thinking=thinking):
-            if ch["phase"] in ("answer", ""):
-                got = True
-                yield ch["text"]
-    except Exception:  # noqa: BLE001
+        for kind, txt in _run(session_id):
+            got = True
+            yield kind, txt
+    except Exception as e:  # noqa: BLE001
         # chat uz nemusi existovat / vyprsel -> zaloz novy a zkus znovu
+        print(f"[qwen-shim] stream selhal ({e}) -> novy chat", file=sys.stderr)
         _convs.drop(session_id)
         session_id = api.new_chat()
-        for ch in api.completion(session_id, prompt, model=model, thinking=thinking):
-            if ch["phase"] in ("answer", ""):
-                got = True
-                yield ch["text"]
+        for kind, txt in _run(session_id):
+            got = True
+            yield kind, txt
     if got:
         _convs.bind(messages, session_id)
 
@@ -99,7 +160,8 @@ def complete(messages: list[dict], model: str, thinking: bool, tools: list | Non
     pamet chatu — klic konverzace by kolidoval (system prompt je u vsech
     pi session stejny) a do novych rozhovoru by prosakovala stara historie.
     """
-    raw = "".join(complete_stream(messages, model, thinking, tools))
+    raw = "".join(t for k, t in complete_stream(messages, model, thinking, tools)
+                  if k == "answer")
     if os.environ.get("SHIM_DUMP"):
         with open(os.environ["SHIM_DUMP"] + ".raw", "a", encoding="utf-8") as f:
             f.write(json.dumps({"text": raw}, ensure_ascii=False) + "\n")
@@ -181,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
         model = body.get("model") or DEFAULT_MODEL
         if model not in MODELS:
             model = DEFAULT_MODEL
-        thinking = bool(body.get("reasoning_effort"))
+        thinking = _wants_thinking(body)
         messages = body.get("messages", [])
         tools = body.get("tools")
         cid = "chatcmpl-" + uuid.uuid4().hex[:24]
@@ -204,7 +266,15 @@ class Handler(BaseHTTPRequestHandler):
             emit({"role": "assistant", "content": ""})
             sp = StreamSplitter(tool_names(tools), tool_specs(tools))
             try:
-                for piece_in in complete_stream(messages, model, thinking, tools):
+                # complete_stream vraci (kind, text): 'think' = mysleni modelu,
+                # 'answer' = odpoved. Mysleni posilame jako `reasoning_content`
+                # (pi z toho udela thinking blok); splitter/cally jedou jen
+                # na odpovedi.
+                for kind, piece_in in complete_stream(messages, model, thinking, tools):
+                    if kind == "think":
+                        if piece_in:
+                            emit({"reasoning_content": piece_in})
+                        continue
                     piece = sp.feed(piece_in)
                     if piece:
                         emit({"content": piece})
