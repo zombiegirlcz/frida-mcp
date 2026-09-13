@@ -133,7 +133,12 @@ def build_prompt(messages: list[dict], tools: list[dict] | None = None,
             )
         content = content or ""
 
-        if role == "system":
+        if role in ("system", "developer"):
+            # POZOR: pi posila svuj system prompt s roli "developer" (ne
+            # "system"). Kdyz ji nerozpoznáme, spadne do vetve pro user a
+            # NIKDY se neinjektuje TOOL_PREAMBLE + schemata nastroju ->
+            # model nevi, jak volat nastroje, a zacne si vymyslet
+            # ("Tool bash does not exists"). Proto bereme obe role stejne.
             if tools and not seen_system:
                 # razantni instrukce PRED pi system promptem, schemata az za nim
                 parts.append(f"[SYSTEM]\n{TOOL_PREAMBLE}\n\n{content}\n\n{schemas}")

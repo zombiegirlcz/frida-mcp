@@ -304,8 +304,11 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self._json(400, {"error": {"message": f"bad json: {e}"}})
             return
-        if os.environ.get("SHIM_DUMP"):
-            with open(os.environ["SHIM_DUMP"], "a", encoding="utf-8") as f:
+        _dump = os.environ.get("SHIM_DUMP")
+        if not _dump and os.path.exists("/tmp/ds_dump_on"):
+            _dump = "/tmp/ds_req.jsonl"
+        if _dump:
+            with open(_dump, "a", encoding="utf-8") as f:
                 f.write(json.dumps(body, ensure_ascii=False) + "\n")
         names = tool_names(body.get("tools"))
         specs = tool_specs(body.get("tools"))
