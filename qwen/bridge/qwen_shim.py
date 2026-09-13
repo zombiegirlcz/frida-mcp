@@ -236,8 +236,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self._json(400, {"error": {"message": f"bad json: {e}"}})
             return
-        if os.environ.get("SHIM_DUMP"):
-            with open(os.environ["SHIM_DUMP"], "a", encoding="utf-8") as f:
+        # Debug dump: staci vytvorit /tmp/qwen_dump_on (bez restartu s env).
+        _dump = os.environ.get("SHIM_DUMP")
+        if not _dump and os.path.exists("/tmp/qwen_dump_on"):
+            _dump = "/tmp/qwen_req.jsonl"
+        if _dump:
+            with open(_dump, "a", encoding="utf-8") as f:
                 f.write(json.dumps(body, ensure_ascii=False) + "\n")
 
         model = body.get("model") or DEFAULT_MODEL
