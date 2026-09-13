@@ -256,12 +256,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
 
+            sent_finish = False
+
             def emit(delta: dict, finish=None) -> None:
+                # `sent_finish` je kvuli pojistce nize: pi jinak hlasi
+                # "Stream ended without finish_reason" a model ztrati nit.
+                nonlocal sent_finish
                 obj = {"id": cid, "object": "chat.completion.chunk", "created": created,
                        "model": model,
                        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
                 self.wfile.write(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode())
                 self.wfile.flush()
+                if finish:
+                    sent_finish = True
 
             emit({"role": "assistant", "content": ""})
             sp = StreamSplitter(tool_names(tools), tool_specs(tools))
@@ -294,6 +301,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 emit({"content": f"\n\n[chyba: {e}]"})
                 emit({}, "stop")
+            finally:
+                # POJISTKA: kazda odpoved MUSI mit finish_reason. Kdyz se
+                # nejaka cesta vynecha (nebo klient ztrati spojeni), pi hlasi
+                # "Stream ended without finish_reason" a chova se zmatene.
+                if not sent_finish:
+                    try:
+                        emit({}, "stop")
+                    except Exception:  # noqa: BLE001
+                        pass
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
             return
