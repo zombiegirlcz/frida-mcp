@@ -35,7 +35,18 @@ from common.toolbridge import (StreamSplitter, build_prompt, parse_tool_calls,
                                tool_specs,
                                to_openai_tool_calls, tool_names)
 
-MODELS = ["qwen3.7-plus", "qwen3.8-max"]
+# Overeno proti zivemu API (appka jich nabizi vic, ale API zna tyto):
+#   qwen3.7-plus, qwen3.8-max, qwen3.7-max, qwen3.6-plus, qwen3.5-plus,
+#   qwen3.5-omni-plus  (text+image+video; my posilame jen text)
+# Neznamy model se tise prepne na DEFAULT_MODEL.
+MODELS = [
+    "qwen3.8-max",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.6-plus",
+    "qwen3.5-plus",
+    "qwen3.5-omni-plus",
+]
 _lock = threading.Lock()
 _api: QwenAPI | None = None
 
