@@ -39,3 +39,4 @@ models.json.tmp.frida-mcp
 test/
 .pi/
 .frida-mcp-config.json
+mcprelay/.relay_token

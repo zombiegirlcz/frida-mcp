@@ -200,6 +200,30 @@ check("ozvena zaverecne instrukce", "Hotovo.\n[INSTRUKCE PRO TENTO TAH]\nOdpovid
 check("ozvena instrukce bez zavorek", "OK\nOdpovidas jako posledni assistant v konverzaci",
       [], "OK")
 
+# 18) REGRESE: <tool_call> nesmi leakovat jako text pri REALNEM deleni chunku.
+#     Drive se bral POSLEDNI trigger znak, takze v chunku
+#         <tool_call>\n{"name":...
+#     vyhral "{" uvnitr JSONu a "<tool_call>\n" sel ven jako viditelny text.
+_RAW = '<tool_call>\n{"name":"bash","arguments":{"command":"ls"}}\n</tool_call>'
+_leak_bad = []
+for _pfx in ("", "Hotovo.\n", 'Data: {"a":1} a pak '):
+    for _sz in (1, 2, 3, 5, 8, 13, 21, 34, 100):
+        _sp = StreamSplitter(TOOLS, SPECS)
+        _raw = _pfx + _RAW
+        _out = ""
+        for _i in range(0, len(_raw), _sz):
+            _out += _sp.feed(_raw[_i:_i + _sz])
+        _tl, _cl = _sp.finish()
+        _out += _tl
+        if "<tool_call" in _out or "</tool_call" in _out or not _cl:
+            _leak_bad.append((_pfx, _sz, _out[:50], len(_cl)))
+if _leak_bad:
+    FAILED.append("tool_call leak")
+    for _pfx, _sz, _o, _n in _leak_bad[:4]:
+        print(f"❌ leak (prefix={_pfx!r} size={_sz}): {_o!r} calls={_n}")
+else:
+    print("✅ <tool_call> neleakuje pri zadnem deleni chunku (27 kombinaci)")
+
 print()
 if FAILED:
     print(f"SELHALO: {len(FAILED)} — {', '.join(FAILED)}")

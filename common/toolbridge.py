@@ -263,6 +263,15 @@ class StreamSplitter:
         self.holding = False
         self.emitted: list[str] = []
 
+    def _find_all(self, ch: str) -> list[int]:
+        """Vsechny pozice znaku `ch` v pendingu (pro hledani markeru)."""
+        out = []
+        i = self.pending.find(ch)
+        while i != -1:
+            out.append(i)
+            i = self.pending.find(ch, i + 1)
+        return out
+
     def _is_marker(self, s: str) -> bool:
         low = s.lower()
         if any(low.startswith(m) for m in _TRIG_REAL):
@@ -289,15 +298,30 @@ class StreamSplitter:
             return ""
         self.pending += chunk
 
-        # najdi posledni mozny zacatek markeru
+        # Najdi PRVNI pozici, odkud je to prokazatelny marker.
+        #
+        # POZOR: nesmime vzit posledni trigger znak! V chunku
+        #     <tool_call>\n{"name":...
+        # je triggeru vic ("<" na 0 a "{" uvnitr JSONu na 11). Kdybychom vzali
+        # posledni (11), poslali bychom "<tool_call>\n" jako VIDITELNY TEXT
+        # a teprve zbytek jako call — presne to leakovalo v session.
+        # Proto hledame prvni pozici, kde _is_marker() plati; teprve kdyz
+        # zadna takova neni, drzime od prvniho triggeru (limit HOLD).
+        positions = sorted({
+            i
+            for c in _TRIGGERS
+            for i in self._find_all(c)
+            if i < 500
+        })
         idx = -1
-        for c in _TRIGGERS:
-            i = self.pending.rfind(c)
-            if i > idx:
+        for i in positions:
+            if self._is_marker(self.pending[i:]):
                 idx = i
-        # POZOR: u RUNU stejnych znaku (``` nebo <<) musime vzit ZACATEK runu.
-        # Jinak se prvni dva backticky hned poslou ven a ve streamu zustane
-        # osirely "```json" — presne to se stavalo u ```json fence.
+                break
+        if idx == -1 and positions:
+            idx = positions[0]
+        # u RUNU stejnych znaku (``` nebo <<) vezmi zacatek runu; jinak by se
+        # prvni dva backticky hned poslaly ven jako osirely "```json"
         if idx > 0 and self.pending[idx] in _TRIGGERS:
             while (idx > 0 and self.pending[idx - 1] == self.pending[idx]
                    and self.pending[idx] in _TRIGGERS):
