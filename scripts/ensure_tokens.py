@@ -68,6 +68,25 @@ def sudo_read(path: str) -> bytes:
     return r.stdout
 
 
+def host_read(path: str) -> bytes:
+    """Precte soubor z HOSTU pres `ashell` + `su`.
+
+    POZOR: v proot guestu byva `sudo` jen **fake root** (uid 0 uvnitr
+    namespace), takze se k datum appky nedostane — `sudo cat` vrati
+    "Permission denied" nebo "No such file or directory", i kdyz soubor
+    existuje. Hostitelske `su` je **realny root** a precte vse.
+    """
+    r = subprocess.run(
+        ["ashell", "-c", f'/product/bin/su -c "cat {path}"'],
+        capture_output=True, timeout=120)
+    if r.returncode != 0:
+        msg = (r.stderr or b"ashell cat selhalo").decode("utf-8", "replace")
+        raise RuntimeError(msg.strip()[:140])
+    if not r.stdout:
+        raise RuntimeError("prazdny vystup")
+    return r.stdout
+
+
 def sudo_read_first(pkg: str, sub: str) -> tuple[bytes, str] | None:
     """Zkusi vsechna mozna umisteni /data a vrati (data, cesta).
 
@@ -84,6 +103,12 @@ def sudo_read_first(pkg: str, sub: str) -> tuple[bytes, str] | None:
         except Exception as e:  # noqa: BLE001
             last = f"{p}: {e}"
             continue
+    # 2) FALLBACK: host pres ashell + su (guest sudo byva jen fake-root)
+    hp = f"/data/data/{pkg}/{sub}"
+    try:
+        return host_read(hp), hp
+    except Exception as e:  # noqa: BLE001
+        last = f"{hp} (ashell): {e}"
     if last:
         log(f"  (zkouseno napr. {last})")
     return None
