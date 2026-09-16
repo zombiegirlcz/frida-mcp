@@ -1,2 +1,19 @@
-# frida-mcp — jediná závislost (verze musí odpovídat frida-serveru na zařízení)
-frida==17.18.0
+# frida-mcp — provoz NEVYŽADUJE žádnou závislost z PyPI.
+#
+# Vše za běhu je jen stdlib:
+#   * shimy (openai_shim.py, qwen_shim.py) — http.server + urllib
+#   * PoW — nativní C (deepseek/native/dspow.c, auto-build přes ctypes+gcc)
+#           nebo pure-Python fallback (deepseek/bridge/pow_native.py)
+#   * tokeny — mmkv parsing + sqlite3 (stdlib)
+#
+# FRIDA JE VOLITELNÁ — jen pro diagnostiku (odposlech síťového provozu,
+# záchrana WAF hlaviček pro Qwen, jednorázové sondy). Nainstaluj ji, jen
+# když ji opravdu chceš:
+#
+#     bash scripts/bootstrap.sh          # s FRIDA_MCP_WITH_FRIDA=1
+#     # nebo ručně:
+#     uv pip install frida==17.18.0
+#
+# Verze musí odpovídat frida-serveru, pokud nějaký běží na zařízení.
+#
+# frida==17.18.0

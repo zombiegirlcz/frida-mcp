@@ -7,9 +7,12 @@
  *
  * Co extension dělá:
  *   1. zapíše providery do ~/.pi/agent/models.json (a zaregistruje je pro tuto session)
- *   2. ověří, že existuje .venv s fridou (případně spustí scripts/bootstrap.sh)
+ *   2. ověří, že je python3 (+ gcc pro nativní PoW; případně spustí scripts/bootstrap.sh)
  *   3. vytáhne tokeny z appek, když chybí (scripts/ensure_tokens.py)
  *   4. nastartuje lokální OpenAI-compatible shimy (porty 13350 a 13360)
+ *
+ * Frida se tu NEpoužívá — v projektu je jen pro volitelnou diagnostiku
+ * (odposlech provozu, záchrana WAF hlaviček), ne jako závislost provozu.
  *
  * Vše je idempotentní: co už běží / existuje, se nedělá znovu.
  * Těžké věci (bootstrap, tokeny) běží na pozadí, aby nezdržovaly start pi.
@@ -397,6 +400,9 @@ const QWEN_TOKEN_FILE = join(ROOT, "qwen", "secrets", "qwen_token");
 
 /**
  * Vynuti obnovu tokenu: smaze stary token + cache a teprve pak vytahne novy.
+ *
+ * Frida se tu nepouziva (jen `ensure_tokens.py` bez `--capture-headers`),
+ * takze obnova tokenu funguje i bez frida-serveru.
  *
  * Proc mazat: `ensure_tokens.py` bez `--force` preskoci token mladsi 12 h,
  * takze po prenuti uctu v appce zustane stary (neplatny) token. Smazanim

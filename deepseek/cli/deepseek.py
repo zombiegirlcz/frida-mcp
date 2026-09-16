@@ -6,7 +6,8 @@ Použití:
     python3 bin/deepseek                # interaktivní chat (REPL)
     python3 bin/deepseek --system "..." # se system promptem
 
-Vyžaduje: běžící DeepSeek appku (kvůli PoW přes fridu) + frida-server na 27042.
+Vyžaduje: DeepSeek token (secrets/deepseek_token). PoW se řeší NATIVNĚ,
+takže běžící appka ani frida-server nejsou potřeba (frida = jen diagnostika).
 """
 
 from __future__ import annotations

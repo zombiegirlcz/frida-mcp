@@ -91,9 +91,12 @@ Ruční doinstalace prostředí (kdyby na to pi neměl čas):
 
 ```bash
 cd ~/.pi/agent/git/github.com/zombiegirlcz/frida-mcp
-bash scripts/bootstrap.sh              # .venv + frida
-bash scripts/deploy_frida_server.sh    # frida-server do /data/local/tmp
+bash scripts/bootstrap.sh              # python + gcc (pro nativni PoW)
 python3 scripts/ensure_tokens.py       # tokeny z appek
+
+# VOLITELNE — jen kdyz chces diagnostiku / odposlech (frida NENI potreba):
+bash scripts/bootstrap.sh              #   s FRIDA_MCP_WITH_FRIDA=1 -> .venv + frida
+# bash scripts/deploy_frida_server.sh  #   frida-server do /data/local/tmp
 ```
 
 ### Ovládání z pi
@@ -175,6 +178,28 @@ pi ─► shim (OpenAI API, stdlib http.server)
   jen ~15 s) a teprve pak legacy frida helper.
 
   Hlavička `X-DS-PoW-Response` = `base64(JSON{algorithm,challenge,salt,signature,answer,target_path})`.
+
+### Frida je jen diagnostika, ne závislost
+
+Projekt **nepotřebuje fridu ani běžící appku** k fungování. Vše, co je
+potřeba za běhu, je python3 + (gcc | pure-Python fallback) + token z appky.
+
+Frida se používá **výhradně** pro:
+* odposlech síťového provozu (`deepseek/agent/dscap.js`, `qwen/agent/qwen_hdr.js`)
+* záchranu WAF hlaviček pro Qwen (`--capture-headers`, volitelné)
+* jednorázové sondy (`probe_run.py`, `attach_when_ready.py`)
+* záložní PoW cestu, **když nejde zkompilovat nativní `.so`**
+
+Nic z toho se při normálním provozu nespouští — `_want_frida_fallback()`
+vrací `False`, jakmile nativní backend žije, a `frida` se **vůbec neimportuje**.
+
+Ověřeno na reálné obnově tokenu (`logs/tokens.log`):
+```
+[tokens] deepseek: ctu /data/data/…
+[tokens] ulozene -> deepseek/secrets/deepseek_token (64 B)
+[tokens] qwen: WAF hlavicky neresim (Qwen staci token)
+```
+→ **žádný frida import, žádný proces navíc**
 
 ### Qwen: token + WAF
 
@@ -328,8 +353,8 @@ common/
   toolbridge.py             tool calling most + StreamSplitter
   tokenauto.py              „chybí token? vytáhni ho"
 scripts/
-  bootstrap.sh              .venv + frida
-  deploy_frida_server.sh    frida-server → /data/local/tmp
+  bootstrap.sh              python + gcc (frida jen s FRIDA_MCP_WITH_FRIDA=1 — diagnostika)
+  deploy_frida_server.sh    frida-server → /data/local/tmp (jen diagnostika)
   ensure_tokens.py          tokeny z DeepSeek MMKV + Qwen cookies
 deepseek/
   bridge/deepseek_api.py    API klient (session, PoW, SSE)
@@ -381,8 +406,15 @@ vůbec neprovede → `bard/bin/gemini-fix start` (daemon, připojí se na `:sear
 
 ### Diagnostika
 
+> Frida je **volitelná** — spouštěj ji jen když potřebuješ odposlech nebo
+> když se něco změnilo v appce a chceš zjistit proč. Běžný provoz ji nechce.
+
 ```bash
-# běží frida-server?
+# JEDE vse potrebne bez fridy?
+for p in 13350 13360; do timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/$p" && echo "$p OK"; done
+cat logs/tokens.log          # obnova tokenu (frida se tu nesmi objevit)
+
+# VOLITELNE: bezi frida-server? (jen pro odposlech)
 timeout 3 bash -c 'echo > /dev/tcp/127.0.0.1/27042' && echo OK
 
 # běží shimy?

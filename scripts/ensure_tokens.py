@@ -12,9 +12,14 @@ Odkud se bere:
              -> deepseek/secrets/deepseek_token, deepseek/secrets/deepseek_uid
   Qwen     : /data/data/ai.qwenlm.chat.android/app_webview/Default/Cookies (cookie `token`)
              -> qwen/secrets/qwen_token
-             (WAF hlavicky resi qwen/bridge/qwen_hdrd.py pres fridu)
 
-Cteni cizich app dat potrebuje realny root -> v proot guestu `sudo`.
+FRIDA SE TU NEPOUZIVA. Token staci sam — WAF hlavicky (x-mini-wua, app_waf)
+nejsou potreba. Volitelny prepinac `--capture-headers` je jen diagnostika
+(odposlech pres fridu) pro pripad, ze by se API zmenilo.
+
+Cteni cizich app dat potrebuje realny root. V proot guestu byva `sudo` jen
+fake-root (uid 0 uvnitr namespace), takze se k datum appky nedostane —
+tehdy se pouzije fallback na host: `ashell -c '/product/bin/su -c "cat …"'`.
 """
 
 from __future__ import annotations
@@ -251,17 +256,16 @@ def qwen_token(force: bool, check: bool) -> bool:
 
 
 def qwen_headers(force: bool, check: bool) -> bool:
-    """WAF hlavicky (x-mini-wua, app_waf, ...) pro chat.qwen.ai.
+    """VOLITELNA DIAGNOSTIKA: WAF hlavicky (x-mini-wua, app_waf) pro chat.qwen.ai.
+
+    NENI potreba pro provoz — Qwen staci token (overeno). Tohle je jen pro
+    pripad, ze by se API zmenilo, aby se dalo zachytit, co appka posila navic.
 
     Nejsou to tokeny — generuje je Aliyun SecurityGuard uvnitr appky pri
     kazdem pozadavku. Zachyti je frida (agent/qwen_hdr.js hookuje SSL_write)
     a ulozi do qwen/secrets/qwen_headers.json, odkud je bere qwen_api.py.
 
-    x-mini-wua je sice "per-request", ale pro replay ji lze pouzit opakovane;
-    app_waf je stabilni. Staci je tedy jednou zachytit.
-
-    Zachytava se z bezneho provozu appky (GET /api/v2/notifications/latest po
-    startu), takze staci appku spustit a chvili pockat.
+    Spousti se POUZE s `--capture-headers`.
     """
     hdr_file = QWEN["headers"]
     if not force and fresh(hdr_file, 3600 * 24 * 7) and headers_complete(hdr_file):

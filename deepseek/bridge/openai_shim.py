@@ -6,7 +6,9 @@ pi → http://127.0.0.1:13350/v1/chat/completions → DeepSeek /api/v0/chat/comp
 Spuštění:
     .venv/bin/python bridge/openai_shim.py [--port 13350]
 
-Vyžaduje: běžící DeepSeek appku + frida-server (PoW) a secrets/deepseek_token.
+Vyžaduje: python3 + secrets/deepseek_token (+ gcc pro nativní PoW; bez gcc
+           se použije pure-Python fallback). Běžící appka ani frida-server
+           NEJSOU potřeba — frida je jen záložní/diagnostická cesta.
 """
 
 from __future__ import annotations
