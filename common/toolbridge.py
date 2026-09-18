@@ -447,6 +447,41 @@ def _coerce_bare(obj, specs: dict[str, dict] | None) -> dict | None:
     return {"name": name, "arguments": obj, "_bare": True}
 
 
+# klice, pod kterymi muze byt obsah jeste jednou zabaleny
+_WRAPPED_ARG_KEYS = ("arguments", "args", "parameters", "input", "kwargs")
+
+
+def _unwrap_args(args: dict, depth: int = 0) -> dict:
+    """Rozbali ARGUMENTY ZABALENE JESTE JEDNOU.
+
+    DeepSeek to posila dost casto, v realne session to shodilo tool call:
+        {"name":"bash","arguments":{"arguments":"{\\"command\\": \\"ls\\"}"}}
+    Bez rozbaleni dostane nastroj `bash` klic `arguments` misto `command`
+    a pi to odmitne:
+        Validation failed for tool "bash":
+          - command: must have required properties command
+
+    Rozbalujeme JEN kdyz je v objektu presne jeden klic z `_WRAPPED_ARG_KEYS`
+    (jinak by to rozbilo nastroj, ktery ma parametr opravdu nazvany
+    `arguments`). Max 3 urovne, aby se to nezacyklilo.
+    """
+    if depth >= 3 or len(args) != 1:
+        return args
+    k = next(iter(args))
+    if k not in _WRAPPED_ARG_KEYS:
+        return args
+    v = args[k]
+    if isinstance(v, str):
+        try:
+            v = json.loads(v) if v.strip() else {}
+        except json.JSONDecodeError:
+            # neni to JSON -> necham puvodni (napr. {"_raw": ...})
+            return args
+    if not isinstance(v, dict) or not v:
+        return args
+    return _unwrap_args(v, depth + 1)
+
+
 def _coerce(obj) -> dict | None:
     if not isinstance(obj, dict):
         return None
@@ -461,6 +496,7 @@ def _coerce(obj) -> dict | None:
             args = {"_raw": args}
     if not isinstance(args, dict):
         args = {}
+    args = _unwrap_args(args)
     return {"name": str(name), "arguments": args}
 
 

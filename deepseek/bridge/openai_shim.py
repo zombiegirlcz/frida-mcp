@@ -29,6 +29,7 @@ for _p in (_PKG, _REPO):
         sys.path.insert(0, _p)
 
 from bridge.deepseek_api import DeepSeekAPI
+from common.netfix import install_dns_cache
 from common.tokenauto import ensure_token
 from common.toolbridge import (TOOLS_REMINDER, StreamSplitter, _strip_stray_tags,
                                tool_specs,
@@ -364,7 +365,11 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     chunk({}, "stop")
             except Exception as e:  # noqa: BLE001
-                chunk({"content": f"\n\n[chyba: {e}]"})
+                # Chyba se posila jako obsah, aby ji pi/uzivatel videl — ale
+                # NESMI vypadat jako odpoved modelu, jinak se z ni stane
+                # "kontext" a model se podle ni zacne opakovat (v realne
+                # session se DNS chyba zopakovala 6x za sebou).
+                chunk({"content": _err_text(e)})
                 chunk({}, "stop")
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
@@ -393,11 +398,36 @@ class Handler(BaseHTTPRequestHandler):
         })
 
 
+def _err_text(e: BaseException) -> str:
+    """Citelna chybova zprava misto holeho tracu.
+
+    U znamych pricin rovnou rekne, co udelat — a hlavne jasne oznaci, ze jde
+    o CHYBU SHIMU, ne o odpoved modelu (model se jinak chyty chytne a opakuje ji).
+    """
+    msg = str(e)
+    low = msg.lower()
+    if "name resolution" in low or "nodename nor servname" in low or "gaierror" in low:
+        return ("\n\n[CHYBA SHIMU: DNS neodpovídá — `Temporary failure in name "
+                "resolution`. Zkontroluj síť / /etc/resolv.conf a zkus to znovu. "
+                "Není to odpověď modelu; tuto zprávu neopakuj.]")
+    if "timed out" in low or "timeout" in low:
+        return ("\n\n[CHYBA SHIMU: API neodpovědělo včas (timeout). Zkus to znovu. "
+                "Není to odpověď modelu; tuto zprávu neopakuj.]")
+    if "connection refused" in low or "connection reset" in low:
+        return ("\n\n[CHYBA SHIMU: spojení se přerušilo. Zkus to znovu. "
+                "Není to odpověď modelu; tuto zprávu neopakuj.]")
+    return (f"\n\n[CHYBA SHIMU: {e} — není to odpověď modelu; "
+            "tuto zprávu neopakuj.]")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("SHIM_PORT", "13350")))
     ap.add_argument("--host", default="127.0.0.1")
     a = ap.parse_args()
+    # Odolný DNS: v proot guestu obcas selze resolvování (Errno -3) a shodil
+    # by cely tah. Cache + opakovani + fallback na posledni uspesny výsledek.
+    install_dns_cache(os.path.join(os.path.dirname(ROOT), "logs", "dns_cache.json"))
     # Token se NEVYŽADUJE hned: shim se musí nastartovat i bez něj, aby se pak
     # na první request sám vytáhl z appky (get_api -> ensure_token). Tvrdý
     # exit tady znamenal, že po `pi update --all` (který smaže secrets/)

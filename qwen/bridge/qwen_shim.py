@@ -31,6 +31,7 @@ for _p in (_PKG, _REPO):
 
 from bridge.qwen_api import DEFAULT_MODEL, QwenAPI, QwenError
 from common.convcache import ConvCache
+from common.netfix import install_dns_cache
 from common.toolbridge import (StreamSplitter, build_prompt, parse_tool_calls,
                                tool_specs,
                                to_openai_tool_calls, tool_names)
@@ -354,6 +355,10 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=int(os.environ.get("QWEN_SHIM_PORT", "13360")))
     ap.add_argument("--host", default="127.0.0.1")
     a = ap.parse_args()
+    # Odolný DNS: v proot guestu obcas selze resolvování (Errno -3) a shodil
+    # by cely tah. Cache + opakovani + fallback na posledni uspesny výsledek.
+    _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    install_dns_cache(os.path.join(_root, "logs", "dns_cache.json"))
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     print(f"[qwen-shim] qwen-free na http://{a.host}:{a.port}/v1  modely={','.join(MODELS)}",
           flush=True)
