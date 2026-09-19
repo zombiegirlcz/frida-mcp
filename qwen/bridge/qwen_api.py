@@ -30,6 +30,7 @@ _REPO = os.path.dirname(ROOT)
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 from common import tokenauto as _auto  # noqa: E402
+from common.qwen_token import pick_newest_token  # noqa: E402
 
 TOKEN_CACHE = os.path.join(SECRETS, "qwen_token")
 COOKIES_DB = os.environ.get(
@@ -62,15 +63,13 @@ def read_token(refresh: bool = False) -> str:
             tmp = t.name
         try:
             con = sqlite3.connect(tmp)
-            rows = con.execute(
-                "SELECT value FROM cookies WHERE name='token' AND host_key LIKE '%qwen%' "
-                "ORDER BY length(value) DESC"
-            ).fetchall()
+            # NEJNOVEJSI token (last_update_utc), NE podle delky —
+            # vsechny JWT maji stejnou delku (~209 B), takze
+            # `length DESC` vybiral nahodne a po prehlaseni uctu
+            # se porad pouzival stary token.
+            tok = pick_newest_token(con)
         finally:
             os.unlink(tmp)
-        if not rows:
-            raise RuntimeError("cookie `token` nenalezena — jsi prihlaseny v Qwen appce?")
-        tok = rows[0][0]
         os.makedirs(SECRETS, exist_ok=True)
         with open(TOKEN_CACHE, "w", encoding="utf-8") as f:
             f.write(tok)
@@ -82,7 +81,14 @@ def read_token(refresh: bool = False) -> str:
         raise
 
 
-def _token_stale(path: str, max_age: float = 3600 * 12) -> bool:
+def _token_stale(path: str, max_age: float = 900) -> bool:
+    """Je cache tokenu zastarala? (default 15 min, driv 12 h.)
+
+    12 h bylo prilis: po prehlaseni uctu v appce se novy token
+    vubec neprecetl a shim jel na stare identite, dokud cache
+    nevyprsela. 15 min je kompromis mezi cerstvosti a poctem
+    sudo cteni.
+    """
     try:
         return (time.time() - os.path.getmtime(path)) > max_age
     except OSError:
