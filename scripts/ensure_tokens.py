@@ -63,9 +63,14 @@ def log(*a):
     print("[tokens]", *a, flush=True)
 
 
-def sudo_read(path: str) -> bytes:
-    """Precte soubor, ktery je citelny jen pro realny root."""
-    r = subprocess.run(["sudo", "cat", path], capture_output=True, timeout=120)
+def sudo_read(path: str, timeout: int = 12) -> bytes:
+    """Precte soubor, ktery je citelny jen pro realny root.
+
+    POZOR: v tomto prostredi je `/usr/local/bin/sudo` jen **wrapper**
+    (`su_wrapper`, ELF z NDK), ktery pri selhani visi ~80 s a pak vrati
+    chybu. Timeout je proto kratky — host_read() je radove rychlejsi.
+    """
+    r = subprocess.run(["sudo", "cat", path], capture_output=True, timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.decode("utf-8", "replace").strip() or "sudo cat selhalo")
     if not r.stdout:
@@ -95,10 +100,23 @@ def host_read(path: str) -> bytes:
 def sudo_read_first(pkg: str, sub: str) -> tuple[bytes, str] | None:
     """Zkusi vsechna mozna umisteni /data a vrati (data, cesta).
 
+    PORADI JE DULEZITE (merene na device):
+      * `ashell` + `su` (host) .......... ~1 s   ← zkousime PRVNI
+      * `sudo cat` (guest) ............ ~79 s a casto selze
+    Kdyz se zkouselo `sudo` prvni, obnova tokenu trvala ~4 minuty (3 cesty
+    x 79 s) a uzivatel to videl jako "zamrzlo". Proto host prvni.
+
     Pozor: os.path.exists() tady NELZE pouzit — data appek jsou citelna jen
-    pod realnym rootem (`sudo`), takze z guestu se tvarí jako neexistujici.
+    pod realnym rootem, takze z guestu se tvari jako neexistujici.
     """
     last: str | None = None
+    # 1) HOST pres ashell + su — rychle a funguje i kdyz je guest sudo fake-root
+    hp = f"/data/data/{pkg}/{sub}"
+    try:
+        return host_read(hp), hp
+    except Exception as e:  # noqa: BLE001
+        last = f"{hp} (ashell): {e}"
+    # 2) FALLBACK: guest sudo (muze byt fake-root a/nebo pomale)
     for root in DATA_ROOTS:
         if not root:
             continue
@@ -108,12 +126,6 @@ def sudo_read_first(pkg: str, sub: str) -> tuple[bytes, str] | None:
         except Exception as e:  # noqa: BLE001
             last = f"{p}: {e}"
             continue
-    # 2) FALLBACK: host pres ashell + su (guest sudo byva jen fake-root)
-    hp = f"/data/data/{pkg}/{sub}"
-    try:
-        return host_read(hp), hp
-    except Exception as e:  # noqa: BLE001
-        last = f"{hp} (ashell): {e}"
     if last:
         log(f"  (zkouseno napr. {last})")
     return None
