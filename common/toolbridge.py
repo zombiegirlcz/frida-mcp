@@ -388,14 +388,21 @@ _TRIGGERS = ("<", "{", "`")
 # prefixu (`< calls>`, `< invoke ...>`). Kdyz je splitter nepozna, streamuje
 # je jako text a pi dostane markup misto tool callu.
 _TRIG_REAL = (
-    "<tool_call", "<tool_calls", "<invoke", "```",
+    "<tool_call", "<tool_calls", "```",
     "<\uff5c", "\uff5cdsml\uff5c", "|dsml|",
-    "< calls>", "<calls>", "< invoke", "<invoke ", "< parameter",
+    "< calls>", "<calls>",
 )
 
-# zkomolene tagy bez `tool_` prefixu (napr. "< calls>", "< invoke name=...")
+# Tag invoke/parameter je PROKAZATELNY marker JEN s atributem name=.
+# Bez nej je to pouha zminka v proze a splitter by zbytecne zacal drzet
+# stream (holding=True) a uz nikdy nic neposlal — presne to se stalo
+# v realnem tahu s deepseekem (odpoved se "zastavila").
+_TRIG_ATTR = re.compile(
+    r"<\s*/?\s*(?:invoke|parameter)\b[^>]{0,200}?\bname\s*=", re.I)
+
+# zkomolene tagy bez `tool_` prefixu (napr. "< calls>")
 _MANGLED_OPEN = re.compile(
-    r"<\s*/?\s*(?:calls|tool_calls|tool_call|invoke|parameter)\b", re.I)
+    r"<\s*/?\s*(?:calls|tool_calls|tool_call)\b", re.I)
 
 
 class StreamSplitter:
@@ -434,7 +441,11 @@ class StreamSplitter:
         low = s.lower()
         if any(low.startswith(m) for m in _TRIG_REAL):
             return True
-        # zkomolene tagy bez `tool_` prefixu: "< calls>", "< invoke name=..."
+        # invoke/parameter je marker JEN s atributem name= (hole tagy v proze
+        # nesmi zablokovat stream — odpoved by se "zastavila")
+        if _TRIG_ATTR.match(s):
+            return True
+        # zkomolene tagy bez `tool_` prefixu: "< calls>"
         if _MANGLED_OPEN.match(s):
             return True
         if s.startswith("{"):
@@ -842,8 +853,20 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None,
     specs:      popis parametru nastroju (viz tool_specs) — umozni poznat
                 i HOLY JSON bez nazvu nastroje.
     """
+    # 0) JSON uvnitr <tool_call>...</tool_call> NESMI projit normalizaci —
+    #    rozbila by stringy v argumentech (napr. obsah souboru, ktery sam
+    #    obsahuje tagy jako <calls> nebo <invoke name=...>).
+    _saved = []
+
+    def _save_json(m):
+        _saved.append(m.group(0))
+        return "\ue000JSON%d\ue000" % (len(_saved) - 1)
+
+    text = _JSON_BLOCK.sub(_save_json, text)
     text = normalize_dsml(text)
     text = normalize_tags(text)
+    for _i, _blk in enumerate(_saved):
+        text = text.replace("\ue000JSON%d\ue000" % _i, _blk)
     # Model casto pokracuje "v nasem prepisu" — sam si domysli vysledek nastroje
     # („[VYSLEDEK NASTROJE bash]\n...") a dalsi tah. Takova cast je halucinace a
     # nesmi se ulozit do viditelneho textu (odtud se model vzor uci a opakuje ho
@@ -871,20 +894,35 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None,
     if calls and _jm:
         text = text[: _jm.start()]
 
-    # odstran CELE bloky tool callu (i s obsahem parametru) — jinak by ve
-    # viditelnem textu zustal treba prikaz z <parameter name="command">ls</parameter>
-    text = re.sub(r"<invoke\b.*?(?:</invoke\s*>|$)", "", text, flags=re.S | re.I)
-    text = re.sub(r"<tool_calls?\b.*?(?:</tool_calls?\s*>|$)", "", text, flags=re.S | re.I)
+    # odstran CELE bloky tool callu z viditelneho textu — ale JEN kdyz nejaky
+    # call existuje a JEN od skutecneho <tag name=...>. Driv tu byl regex
+    # r"<invoke\b.*?(?:</invoke>|$)", ktery urezl i PROZU, ktera tag jen
+    # zminuje ("vysvetli <invoke> tag") — odpoved se pak ztratila (realne:
+    # text "Tagy `" misto cele odpovedi).
+    if calls:
+        _inv = _INVOKE.search(text)
+        if _inv:
+            text = text[: _inv.start()]
+        _tc = re.search(r"<tool_calls?\b", text, re.I)
+        if _tc:
+            text = text[: _tc.start()]
 
     # 5) uklid obalu, ktere nemaji zustat ve viditelnem textu
+    #
+    # POZOR: tagy invoke/parameter/function a zkomolene zbytky se uklizi JEN
+    # kdyz existuje tool call. Kdyz model jen PISE o techto tagach ("vysvetli,
+    # co je <invoke>"), je to bezny text a nesmi se mazat — jinak odpoved
+    # osiří (realne: "Tagy `` a `` se v XML...").
+    #
+    # Naopak <tool_call>/<tool_calls> uklizime VZDY: to je nas protokolovy
+    # marker a kdyby leaknul do textu, pi by se zblaznil.
     text = _TAG.sub("", text)
-    text = re.sub(r"</?(?:invoke|parameter|function|tool_call|tool_calls)\b[^>]*>",
-                  "", text, flags=re.I)
-    # model obcas odpoved utne uprostred tagu (napr. zbytek "</tool")
-    text = re.sub(r"</?(?:tool|call|tool_call|tool_calls|invoke|parameter|function)[a-z_]*\s*$",
-                  "", text, flags=re.I)
-    # a ruzne zkomolene zbytky tagu kdekoliv v textu, napr. "<_call>"
-    text = _STRAY_TAG.sub("", text)
+    if calls:
+        text = re.sub(r"</?(?:invoke|parameter|function)\b[^>]*>", "", text, flags=re.I)
+        text = re.sub(
+            r"</?(?:tool|call|tool_call|tool_calls|invoke|parameter|function)[a-z_]*\s*$",
+            "", text, flags=re.I)
+        text = _STRAY_TAG.sub("", text)
 
     return text.strip(), calls
 
@@ -900,7 +938,11 @@ def _extract_calls(text: str, tool_names: set[str] | None,
     # 1) <invoke name="x"><parameter ...>…</parameter></invoke>  (DSML / Anthropic)
     if "<invoke" in text.lower():
         for m in _INVOKE.finditer(text):
-            calls.append({"name": m.group(1), "arguments": _parse_params(m.group(2))})
+            c = {"name": m.group(1), "arguments": _parse_params(m.group(2))}
+            # i tady musi projit filtrem na znamy nazev nastroje — jinak se
+            # za call povazuje i proza zminujici tag a odpoved se "zastavi"
+            if ok(c):
+                calls.append(c)
         if calls:
             return calls
 

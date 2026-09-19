@@ -224,6 +224,41 @@ if _leak_bad:
 else:
     print("✅ <tool_call> neleakuje pri zadnem deleni chunku (27 kombinaci)")
 
+
+# 19) REGRESE: model jen PISE o tagach invoke/parameter (bez tool callu).
+#     Driv to shodil dve veci:
+#       - uklidovy regex urezl text od prvniho <invoke> do konce odpovedi
+#       - splitter zacal drzet stream a odpoved se "zastavila"
+#     Realne se to stalo v tahu, kde se uzivatel ptal, co tagy znamenaji.
+_PROZA = "Tagy `<invoke>` a `<parameter>` se v XML pouzivaji jako obal. KONEC-123"
+check("proza zminujici tagy zustava CELE", _PROZA, [], _PROZA)
+check("proza s tagy bez name= neni call",
+      "Vysvetleni: <invoke> je obal a <parameter> hodnota.",
+      [], "Vysvetleni: <invoke> je obal a <parameter> hodnota.")
+
+# 20) REGRESE: splitter NESMI zacit drzet stream na proze s holym tagem
+#     (jinak se odpoved "zastavi" a nedorazi vubec nic).
+_prose_hold = ("Tagy `<invoke>` a `<parameter>` se v XML pouzivaji jako obal. "
+               "KONEC-123")
+_sp = StreamSplitter(TOOLS, SPECS)
+_out = ""
+for _i in range(0, len(_prose_hold), 4):
+    _out += _sp.feed(_prose_hold[_i:_i + 4])
+_tl, _cl = _sp.finish()
+_out += _tl
+if _out != _prose_hold or _cl or _sp.holding:
+    FAILED.append("proza s tagy zablokovala stream")
+    print(f"❌ proza s tagy: out={_out[:60]!r} calls={len(_cl)} holding={_sp.holding}")
+else:
+    print("✅ proza s tagy nezablokuje stream (splitter nedrzi)")
+
+# 21) REGRESE: JSON uvnitr tool callu obsahuje tagy -> normalizace ho NESMI
+#     rozbit (jinak by se obsah souboru poslal zkomoleny).
+check("JSON s tagy uvnitr zustava validni",
+      '<tool_call>{"name":"write","arguments":{"path":"/tmp/x",'
+      '"content":"text s <invoke> a <\uff5cDSML\uff5ccalls> tagem"}}</tool_call>',
+      ["write"])
+
 print()
 if FAILED:
     print(f"SELHALO: {len(FAILED)} — {', '.join(FAILED)}")
