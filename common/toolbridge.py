@@ -520,6 +520,10 @@ class StreamSplitter:
         if not self.holding:
             tail, self.pending = self.pending, ""
             return tail, []
+        # Po finish() uz NIC nedrzime — i kdyz se ukaze, ze to call nebyl
+        # (napr. proza s <invoke name=... bez <parameter). Drzeni po
+        # konci streamu jinak nechalo odpoved viset.
+        self.holding = False
         text, calls = parse_tool_calls(full, self.names, self.specs)
         # Co uz klient dostal, je SPOLECNY PREFIX. parse_tool_calls text na konci
         # stripuje, takze presne porovnani selhava (napr. uz odeslane
@@ -916,8 +920,10 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None,
     #
     # Naopak <tool_call>/<tool_calls> uklizime VZDY: to je nas protokolovy
     # marker a kdyby leaknul do textu, pi by se zblaznil.
-    text = _TAG.sub("", text)
+    # <tool_calls uklizime JEN kdyz existuje call. Kdyz model jen
+    # PISE o tagu, je to bezny text a nesmi zmizet.
     if calls:
+        text = _TAG.sub("", text)
         text = re.sub(r"</?(?:invoke|parameter|function)\b[^>]*>", "", text, flags=re.I)
         text = re.sub(
             r"</?(?:tool|call|tool_call|tool_calls|invoke|parameter|function)[a-z_]*\s*$",
@@ -938,7 +944,13 @@ def _extract_calls(text: str, tool_names: set[str] | None,
     # 1) <invoke name="x"><parameter ...>…</parameter></invoke>  (DSML / Anthropic)
     if "<invoke" in text.lower():
         for m in _INVOKE.finditer(text):
-            c = {"name": m.group(1), "arguments": _parse_params(m.group(2))}
+            body = m.group(2)
+            # <invoke name="x" v PROZE (bez jedineho <parameter) neni call.
+            # Realny call ma vzdy aspon jeden <parameter; bez teto kontroly se
+            # veta premenila na tool call s prazdnymi argumenty a text se urizl.
+            if "<parameter" not in body.lower():
+                continue
+            c = {"name": m.group(1), "arguments": _parse_params(body)}
             # i tady musi projit filtrem na znamy nazev nastroje — jinak se
             # za call povazuje i proza zminujici tag a odpoved se "zastavi"
             if ok(c):
