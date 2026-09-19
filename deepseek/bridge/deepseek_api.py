@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 import urllib.request
 
 BASE = "https://chat.deepseek.com"
@@ -21,6 +22,36 @@ BASE = "https://chat.deepseek.com"
 # obnovit token a zkusit znovu (nikoliv trvat error).
 AUTH_BIZ_CODES = {40001, 40004, 40008, 40009, 40011, 40013, 40301, 40302}
 
+# Prodlevy mezi pokusy, kdyz server vrati rate limit ("Příliš časté zprávy").
+# Agent dela hodne dotazu rychle za sebou, takze se to deje casto.
+RATE_LIMIT_DELAYS = (3.0, 8.0, 20.0)
+
+
+def _hint_error(obj: dict) -> "DeepSeekError | None":
+    """Rozpozna chybove hlaseni v SSE.
+
+    DeepSeek posila chyby jako `event: hint` s daty:
+        {"type":"error", "content":"Příliš časté zprávy…",
+         "finish_reason":"rate_limit_reached"}
+    Drive se to ignorovalo -> `got` zustalo False a shim to hlasil jako
+    "prazdna odpoved (zadne data:)", coz je matouci a hlavne se to nedalo
+    rozlisit od neplatneho tokenu.
+    """
+    if obj.get("type") != "error":
+        return None
+    msg = str(obj.get("content") or obj.get("msg") or "").strip()
+    fr = str(obj.get("finish_reason") or "")
+    low = (msg + " " + fr).lower()
+    is_rate = ("rate_limit" in low or "prilis" in low or "příliš" in low
+               or "too many" in low or "zkuste to znovu" in low)
+    text = msg or fr or "neznamy error"
+    if is_rate:
+        return DeepSeekError(
+            f"chat/completion: RATE LIMIT — {text} "
+            f"(agent poslal příliš mnoho dotazů rychle po sobě)",
+            retry=True, rate_limited=True)
+    return DeepSeekError(f"chat/completion: {text}", retry=False)
+
 
 class DeepSeekError(RuntimeError):
     """Chyba od DeepSeek API (neplatny token, rate limit, invalid message...).
@@ -28,10 +59,13 @@ class DeepSeekError(RuntimeError):
     Rozsirene o `biz_code` a `retry` (zda staci obnovit token a zkusit znovu).
     """
 
-    def __init__(self, msg: str, biz_code: int | None = None, retry: bool = False):
+    def __init__(self, msg: str, biz_code: int | None = None, retry: bool = False,
+                 rate_limited: bool = False):
         super().__init__(msg)
         self.biz_code = biz_code
         self.retry = retry
+        # rate limit se pozna podle finish_reason=rate_limit_reached
+        self.rate_limited = rate_limited
 
     @staticmethod
     def from_resp(resp: dict, what: str) -> "DeepSeekError | None":
@@ -229,7 +263,30 @@ class DeepSeekAPI:
         Po dokonceni nastavi `self.last_response_message_id` — to je ID odpovedi,
         ktere se posila jako `parent_message_id` v dalsim tahu (server si tak drzi
         kontext konverzace a nemusime posilat celou historii).
+
+        Pri RATE LIMITu (server posle `event: hint` s
+        `{"type":"error","finish_reason":"rate_limit_reached"}`) zkusi
+        pozadavek znovu s backoffem — agent dela hodne dotazu rychle za sebou
+        a bez tohohle se cely tah ztratil jako "prazdna odpoved".
         """
+        delays = RATE_LIMIT_DELAYS
+        for attempt in range(len(delays) + 1):
+            yielded = False
+            try:
+                for kind, text in self._completion_once(session_id, prompt, **kw):
+                    yielded = True
+                    yield kind, text
+                return
+            except DeepSeekError as e:
+                if not (e.retry and e.rate_limited) or yielded or attempt >= len(delays):
+                    raise
+                wait = delays[attempt]
+                print(f"[deepseek] rate limit — cekam {wait:.0f}s a zkousim znovu "
+                      f"({attempt + 1}/{len(delays)})", flush=True)
+                time.sleep(wait)
+
+    def _completion_once(self, session_id: str, prompt: str, **kw):
+        """Jeden pokus o dokonceni (viz completion_stream)."""
         challenge = self.create_pow_challenge()
         answer = self._solve(challenge)
         hdr = self.pow_header(challenge, answer)
@@ -263,6 +320,7 @@ class DeepSeekAPI:
             data=json.dumps(body).encode(), headers=h, method="POST")
         got = False
         fallback: list[str] = []
+        seen_error: DeepSeekError | None = None
         self.last_response_message_id = None
         self._last_frag_type = "RESPONSE"
         with urllib.request.urlopen(req, timeout=180) as r:
@@ -280,6 +338,11 @@ class DeepSeekAPI:
                     continue
                 if not isinstance(obj, dict):
                     continue
+                # chybova "hint" hlaseni chodi taky jako data: radek
+                hint = _hint_error(obj)
+                if hint is not None:
+                    seen_error = hint
+                    continue
                 if self.last_response_message_id is None:
                     if obj.get("response_message_id"):
                         self.last_response_message_id = obj["response_message_id"]
@@ -294,7 +357,10 @@ class DeepSeekAPI:
                         got = True
                         yield kind, text
         if not got:
-            # nic neseznamene -> hledej chybove JSON v fallback
+            # 1) chyba prisla jako `event: hint` s {"type":"error",...}
+            if seen_error is not None:
+                raise seen_error
+            # 2) nic neseznamene -> hledej chybove JSON v fallback
             for line in fallback:
                 try:
                     o = json.loads(line)

@@ -209,9 +209,104 @@ def test_error_text():
     check("13. chyba: timeout je popsany", "timeout" in to.lower() and "CHYBA SHIMU" in to,
           repr(to[:80]))
 
+    rl = openai_shim._err_text(
+        RuntimeError("chat/completion: RATE LIMIT — Příliš časté zprávy."))
+    check("14b. chyba: rate limit ma vlastni srozumitelnou zpravu",
+          "RATE LIMIT" in rl and "minutu" in rl and "neopakuj" in rl, repr(rl[:90]))
+
     other = openai_shim._err_text(RuntimeError("neco divneho"))
     check("14. chyba: neznama chyba je oznacena jako chyba shimu",
           "CHYBA SHIMU" in other and "neopakuj" in other, repr(other[:80]))
+
+
+# ------------------------------------------------ 4) RATE LIMIT (hlavni pricina)
+# V session.jsonl: odpoved bez dat. Syrova odpoved serveru je:
+#   event: hint
+#   data: {"type":"error","content":"Příliš časté zprávy…",
+#          "finish_reason":"rate_limit_reached"}
+# Shim to hlasil jako "prazdna odpoved (zadne data:)" — nedalo se to
+# rozlisit od neplatneho tokenu a cely tah se ztratil.
+
+RATE_HINT = {"type": "error",
+             "content": "Příliš časté zprávy. Zkuste to znovu později.",
+             "clear_response": True, "finish_reason": "rate_limit_reached"}
+
+
+def test_hint_error_detects_rate_limit():
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "deepseek", "bridge"))
+    from deepseek.bridge.deepseek_api import _hint_error  # noqa: PLC0415
+
+    e = _hint_error(RATE_HINT)
+    check("15. rate limit: rozpoznan jako retryable",
+          e is not None and e.retry and e.rate_limited, f"e={e}")
+    check("16. rate limit: zprava obsahuje RATE LIMIT",
+          e is not None and "RATE LIMIT" in str(e), str(e)[:80])
+
+    # normalni chunky se nesmi plest s chybou
+    check("17. rate limit: bezny chunk neni error",
+          _hint_error({"p": "response/content", "o": "APPEND", "v": "ahoj"}) is None)
+    check("18. rate limit: event close neni error",
+          _hint_error({"click_behavior": "retry", "auto_resume": False}) is None)
+
+    other = _hint_error({"type": "error", "content": "neco jineho"})
+    check("19. rate limit: jina chyba se neoznaci jako rate limit",
+          other is not None and not other.rate_limited, f"other={other}")
+
+
+def test_rate_limit_retry():
+    """completion_stream musi pri rate limitu zkusit znovu (a pak uspet)."""
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "deepseek", "bridge"))
+    from deepseek.bridge import deepseek_api as A  # noqa: PLC0415
+
+    api = A.DeepSeekAPI.__new__(A.DeepSeekAPI)
+    api.last_response_message_id = None
+    calls = {"n": 0}
+
+    def fake_once(session_id, prompt, **kw):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise A.DeepSeekError("rate limit", retry=True, rate_limited=True)
+        yield "answer", "HOTOVO"
+
+    api._completion_once = fake_once
+    old_delays = A.RATE_LIMIT_DELAYS
+    A.RATE_LIMIT_DELAYS = (0, 0, 0)
+    try:
+        got = "".join(t for _k, t in api.completion_stream("s", "p"))
+        check("20. rate limit: po 2 selhanich se to povede",
+              got == "HOTOVO" and calls["n"] == 3, f"got={got!r} calls={calls['n']}")
+    finally:
+        A.RATE_LIMIT_DELAYS = old_delays
+
+
+def test_rate_limit_does_not_retry_after_content():
+    """Kdyz uz neco odeslo, retry by obsah zduplikoval -> nezkouset."""
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "deepseek", "bridge"))
+    from deepseek.bridge import deepseek_api as A  # noqa: PLC0415
+
+    api = A.DeepSeekAPI.__new__(A.DeepSeekAPI)
+    calls = {"n": 0}
+
+    def fake_once(session_id, prompt, **kw):
+        calls["n"] += 1
+        yield "answer", "cast"
+        raise A.DeepSeekError("rate limit", retry=True, rate_limited=True)
+
+    api._completion_once = fake_once
+    old_delays = A.RATE_LIMIT_DELAYS
+    A.RATE_LIMIT_DELAYS = (0, 0, 0)
+    try:
+        try:
+            "".join(t for _k, t in api.completion_stream("s", "p"))
+            check("21. rate limit: po odeslani obsahu se neopakuje", False, "nevyhodilo")
+        except A.DeepSeekError:
+            check("21. rate limit: po odeslani obsahu se neopakuje", calls["n"] == 1,
+                  f"pokusu={calls['n']}")
+    finally:
+        A.RATE_LIMIT_DELAYS = old_delays
 
 
 def main() -> int:
@@ -223,6 +318,9 @@ def main() -> int:
     test_wrapped_not_unwrapped_when_ambiguous()
     test_bad_string_not_unwrapped()
     test_error_text()
+    test_hint_error_detects_rate_limit()
+    test_rate_limit_retry()
+    test_rate_limit_does_not_retry_after_content()
     print()
     if FAILED:
         print(f"SELHALO: {len(FAILED)} — " + ", ".join(FAILED))

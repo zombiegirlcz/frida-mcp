@@ -406,6 +406,11 @@ def _err_text(e: BaseException) -> str:
     """
     msg = str(e)
     low = msg.lower()
+    if "rate limit" in low or "prilis" in low or "příliš" in low:
+        return ("\n\n[CHYBA SHIMU: RATE LIMIT — DeepSeek dočasně odmítá další dotazy "
+                "(„Příliš časté zprávy“). Agent jich poslal moc rychle za sebou. "
+                "Počkej ~1 minutu a zkus to znovu. Není to odpověď modelu; "
+                "tuto zprávu neopakuj.]")
     if "name resolution" in low or "nodename nor servname" in low or "gaierror" in low:
         return ("\n\n[CHYBA SHIMU: DNS neodpovídá — `Temporary failure in name "
                 "resolution`. Zkontroluj síť / /etc/resolv.conf a zkus to znovu. "
