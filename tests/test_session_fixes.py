@@ -309,6 +309,64 @@ def test_rate_limit_does_not_retry_after_content():
         A.RATE_LIMIT_DELAYS = old_delays
 
 
+# ------------------------------------ 5) Qwen: "nastroje nejsou dostupne"
+# Uzivatel: "qwen porad pise ze nastroje jsou nedostupne... jako by to ani
+# nezkusila". Pricina: pi posila system prompt s roli "developer"; stara
+# `_cap_messages` chranila jen "system", takze pri delsi konverzaci developer
+# zpravu ZAHODILA — a s ni i TOOL_PREAMBLE + schemata nastroju, ktere
+# `build_prompt` vklada PRAVE do ni.
+
+def test_cap_keeps_developer_message():
+    """pi posila system prompt s roli "developer" — pri zkraceni se nesmi zahodit,
+    jinak zmizi i schemata nastroju a model hlasi "nastroje nejsou dostupne"."""
+    from common.toolbridge import cap_messages, build_prompt  # noqa: PLC0415
+
+    tools = [{"type": "function", "function": {"name": "bash",
+              "description": "Spusti prikaz",
+              "parameters": {"type": "object",
+                             "properties": {"command": {"type": "string"}},
+                             "required": ["command"]}}}]
+    msgs = [
+        {"role": "developer", "content": "Jsi pi agent s nastroji."},
+        {"role": "user", "content": "ahoj"},
+        {"role": "assistant", "content": "y" * 400},
+        {"role": "user", "content": "Posledni dotaz."},
+    ]
+    kept, trimmed = cap_messages(msgs, limit=200)
+    roles = [m.get("role") for m in kept]
+    check("22. cap: developer zprava se pri zkraceni ZACHOVA",
+          "developer" in roles, f"role po zkraceni={roles}")
+    check("23. cap: zkraceni opravdu probehlo", trimmed is True)
+    check("24. cap: posledni zprava zustava",
+          any(m.get("content") == "Posledni dotaz." for m in kept), f"kept={roles}")
+
+    prompt = build_prompt(kept, tools)
+    check("25. cap: po zkraceni zustanou schemata nastroju v promptu",
+          '"bash"' in prompt and "command" in prompt,
+          "schemata nastroju v promptu chybi")
+
+
+def test_cap_no_trim_when_small():
+    from common.toolbridge import cap_messages  # noqa: PLC0415
+
+    msgs = [{"role": "developer", "content": "a"},
+            {"role": "user", "content": "b"}]
+    kept, trimmed = cap_messages(msgs, limit=10_000)
+    check("26. cap: kratka konverzace se nezkracuje",
+          kept == msgs and trimmed is False)
+
+
+def test_cap_system_role_also_works():
+    from common.toolbridge import cap_messages  # noqa: PLC0415
+
+    msgs = [{"role": "system", "content": "sys"},
+            {"role": "user", "content": "z" * 400}]
+    kept, trimmed = cap_messages(msgs, limit=50)
+    check("27. cap: role system se chrani taky",
+          any(m.get("role") == "system" for m in kept) and trimmed,
+          f"kept={[m.get('role') for m in kept]}")
+
+
 def main() -> int:
     test_dns_cache()
     test_dns_cache_survives_and_persists()
@@ -321,6 +379,9 @@ def main() -> int:
     test_hint_error_detects_rate_limit()
     test_rate_limit_retry()
     test_rate_limit_does_not_retry_after_content()
+    test_cap_keeps_developer_message()
+    test_cap_no_trim_when_small()
+    test_cap_system_role_also_works()
     print()
     if FAILED:
         print(f"SELHALO: {len(FAILED)} — " + ", ".join(FAILED))

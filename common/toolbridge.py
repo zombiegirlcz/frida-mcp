@@ -107,6 +107,38 @@ def render_tool(tool: dict) -> str:
     return "\n".join(out)
 
 
+def cap_messages(messages: list[dict], limit: int) -> tuple[list[dict], bool]:
+    """Vrati (zpravy, zkraceno?). Drzi prvni system/developer zpravu + nejnovejsi.
+
+    ⚠️ POZOR: pi posila svuj system prompt s roli **"developer"** (ne "system")!
+    Kdyz se chrani jen "system", developer zprava se pri zkraceni zahodi — a
+    protoze `build_prompt` vklada TOOL_PREAMBLE + schemata nastroju PRAVE do
+    prvni system/developer zpravy, zmizi i schémata. Model pak vi, ze nejake
+    nastroje existuji, ale nevidi jejich jmena ani parametry a zacne psat
+    "nastroje nejsou dostupne" (presne to se delo u Qwenu po delsi konverzaci).
+    """
+    def _size(m):
+        c = m.get("content")
+        return len(c) if isinstance(c, str) else len(str(c or ""))
+
+    if sum(_size(m) for m in messages) <= limit:
+        return messages, False
+
+    head = [m for m in messages if m.get("role") in ("system", "developer")][:1]
+    rest = [m for m in messages if m.get("role") not in ("system", "developer")]
+    keep: list[dict] = []
+    # rozpocet snizime o chranenou zpravu, aby se do limitu vesla
+    used = sum(_size(m) for m in head)
+    for m in reversed(rest):
+        ln = _size(m)
+        if keep and used + ln > limit:
+            break
+        keep.append(m)
+        used += ln
+    keep.reverse()
+    return head + keep, True
+
+
 def build_prompt(messages: list[dict], tools: list[dict] | None = None,
                  trailer: bool | None = None) -> str:
     """OpenAI messages (+tools) -> jeden prompt pro nasi chat API.

@@ -32,8 +32,8 @@ for _p in (_PKG, _REPO):
 from bridge.qwen_api import DEFAULT_MODEL, QwenAPI, QwenError
 from common.convcache import ConvCache
 from common.netfix import install_dns_cache
-from common.toolbridge import (StreamSplitter, build_prompt, parse_tool_calls,
-                               tool_specs,
+from common.toolbridge import (StreamSplitter, build_prompt, cap_messages,
+                               parse_tool_calls, tool_specs,
                                to_openai_tool_calls, tool_names)
 
 # Overeno proti zivemu API (appka jich nabizi vic, ale API zna tyto):
@@ -75,25 +75,11 @@ MAX_PROMPT_CHARS = int(os.environ.get("QWEN_MAX_PROMPT", "300000"))
 
 
 def _cap_messages(messages: list[dict], limit: int | None = None):
-    """Vrati (zpravy, zkraceno?). Drzi prvni system zpravu + nejnovejsi zpravy."""
-    limit = limit or MAX_PROMPT_CHARS
-    def _size(m):
-        c = m.get("content")
-        return len(c) if isinstance(c, str) else len(str(c or ""))
-    total = sum(_size(m) for m in messages)
-    if total <= limit:
-        return messages, False
-    sys_msg = [m for m in messages if m.get("role") == "system"][:1]
-    rest = [m for m in messages if m.get("role") != "system"]
-    keep, used = [], 0
-    for m in reversed(rest):
-        ln = _size(m)
-        if keep and used + ln > limit:
-            break
-        keep.append(m)
-        used += ln
-    keep.reverse()
-    return sys_msg + keep, True
+    """Vrati (zpravy, zkraceno?). Drzi prvni system/developer zpravu + nejnovejsi.
+
+    Vlastni logika je v `common.toolbridge.cap_messages` (sdilene, otestovane).
+    """
+    return cap_messages(messages, limit or MAX_PROMPT_CHARS)
 
 
 def _wants_thinking(body: dict) -> bool:
