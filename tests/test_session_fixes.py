@@ -429,6 +429,76 @@ def test_cap_really_shrinks_11mb():
           any(m.get("role") == "developer" for m in capped))
 
 
+# ------------------------- 7) cap meril SPATNE (ignoroval tool_calls arguments)
+# V praxi: cap rekl "zkracen na 400000 znaku (2 z 2 zprav)", ale prompt mel
+# 11 084 794 znaku -> server vratil "Dosažen limit délky". Pricina: `_size()`
+# meril jen `content`, ale `build_prompt()` renderuje i
+# `tool_calls[].function.arguments`, kde byla ta megabajtova data.
+
+def test_size_counts_tool_call_arguments():
+    from common.toolbridge import _msg_size  # noqa: PLC0415
+
+    big = "x" * 5_000_000
+    msg = {"role": "assistant", "content": "Zapisuji.",
+           "tool_calls": [{"id": "c1", "type": "function", "function": {
+               "name": "write",
+               "arguments": json.dumps({"path": "/tmp/a", "content": big})}}]}
+    size = _msg_size(msg)
+    check("41. cap: _msg_size pocita i tool_calls arguments",
+          size > 5_000_000, f"_msg_size={size} (mel by byt > 5 MB)")
+
+    # i obsah jako bloky (pi posila content jako list)
+    blocks = {"role": "user", "content": [{"type": "text", "text": "y" * 1000}]}
+    check("42. cap: _msg_size pocita i content bloky",
+          _msg_size(blocks) >= 1000, f"_msg_size={_msg_size(blocks)}")
+
+
+def test_cap_real_11mb_case():
+    """Presne scenar z praxe: 2 zpravy, z toho jedna 11 MB."""
+    from common.toolbridge import cap_messages, build_prompt  # noqa: PLC0415
+
+    big = "x" * 11_000_000
+    msgs = [
+        {"role": "developer", "content": "Jsi agent s nastroji."},
+        {"role": "assistant", "content": "Zapisuji.",
+         "tool_calls": [{"id": "c1", "type": "function", "function": {
+             "name": "write",
+             "arguments": json.dumps({"path": "/tmp/a", "content": big})}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        {"role": "user", "content": "Pokracuj a spocitej .py soubory."},
+    ]
+    capped, trimmed = cap_messages(msgs, 400_000)
+    prompt = build_prompt(capped, None)
+    check("43. limit delky: 11 MB se opravdu zmensi",
+          len(prompt) < 1_000_000, f"prompt={len(prompt)}")
+    check("44. limit delky: zkraceni hlaseno", trimmed is True)
+
+    args = capped[1]["tool_calls"][0]["function"]["arguments"]
+    try:
+        parsed = json.loads(args)
+    except json.JSONDecodeError:
+        parsed = None
+    check("45. limit delky: argumenty zustavaji VALIDNI JSON",
+          isinstance(parsed, dict), "rozbity JSON -> build_prompt zahodi obsah")
+    check("46. limit delky: klic 'content' zustava (jen zkraceny)",
+          isinstance(parsed, dict) and "content" in parsed)
+    check("47. limit delky: je videt, ze se kratilo",
+          "zkráceno" in args, "chybi znacka o zkraceni")
+
+
+def test_shrink_size_matches_text_content():
+    """_msg_size musi odpovidat realne velikosti promptu (jinak cap klame)."""
+    from common.toolbridge import cap_messages, build_prompt, _msg_size  # noqa: PLC0415
+
+    msgs = [{"role": "developer", "content": "d"},
+            {"role": "user", "content": "z" * 500_000}]
+    capped, trimmed = cap_messages(msgs, 200_000)
+    prompt = build_prompt(capped, None)
+    check("48. cap: zkraceny prompt se vejde pod limit",
+          len(prompt) <= 220_000, f"prompt={len(prompt)} limit=200000")
+    check("49. cap: hlaseno zkraceni", trimmed is True)
+
+
 def main() -> int:
     test_dns_cache()
     test_dns_cache_survives_and_persists()
@@ -447,6 +517,9 @@ def main() -> int:
     test_hint_error_detects_length_limit()
     test_deepseek_shim_caps_context()
     test_cap_really_shrinks_11mb()
+    test_size_counts_tool_call_arguments()
+    test_cap_real_11mb_case()
+    test_shrink_size_matches_text_content()
     print()
     if FAILED:
         print(f"SELHALO: {len(FAILED)} — " + ", ".join(FAILED))

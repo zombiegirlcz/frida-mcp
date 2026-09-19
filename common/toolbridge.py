@@ -107,6 +107,123 @@ def render_tool(tool: dict) -> str:
     return "\n".join(out)
 
 
+def _msg_size(m: dict) -> int:
+    """Velikost zpravy tak, jak se REALNE objevi v promptu.
+
+    ⚠️ NESTACI merit jen `content`! `build_prompt()` renderuje i
+    `tool_calls[].function.arguments`, a prave tam byvaji obrovska data
+    (napr. obsah souboru u `write`). Kdyz se arguments ignorovaly, cap
+    "prosel" (2 z 2 zprav), ale vysledny prompt mel **11 MB** a server
+    vratil "Dosažen limit délky. Začněte nový chat." — namereno v praxi.
+    """
+    n = 0
+    c = m.get("content")
+    if isinstance(c, str):
+        n += len(c)
+    elif isinstance(c, list):
+        # pi posila content jako bloky [{'type':'text','text':...}]
+        for part in c:
+            if isinstance(part, dict):
+                n += len(part.get("text") or part.get("content") or "")
+            elif isinstance(part, str):
+                n += len(part)
+    elif c:
+        n += len(str(c))
+    # tool_calls -> build_prompt z nich dela <tool_call>{...}</tool_call>
+    for tc in m.get("tool_calls") or []:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function") or {}
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            n += len(args)
+        elif args is not None:
+            n += len(str(args))
+        n += len(str(fn.get("name") or "")) + 32
+    for k in ("name", "tool_call_id", "reasoning_content"):
+        v = m.get(k)
+        if isinstance(v, str):
+            n += len(v)
+    return n + 24  # obal a znacky ([ASSISTANT], [TOOL]…)
+
+
+def _clip(s: str, max_len: int) -> str:
+    """Zkrati retezec na max_len (zachova ZACATEK i KONEC — konec byva dulezity)."""
+    if len(s) <= max_len:
+        return s
+    head = max_len * 2 // 3
+    tail = max_len - head
+    return (s[:head]
+            + f"\n…[zkráceno {len(s) - max_len} znaků]…\n"
+            + s[-tail:])
+
+
+def _shrink_args(raw: str, max_len: int) -> str:
+    """Zkrati hodnoty v JSON argumentech, ale ZACHOVA VALIDNI JSON.
+
+    ⚠️ Proc takhle: `build_prompt()` dela `json.loads(fn["arguments"])`, a kdyz
+    je JSON rozbity (napr. useknuty uprostred stringu), spadne do
+    `args = {}` a **obsah zahodi uplne** — zkraceni by tak ztratilo smysl
+    (protoze by se neposlalo ani to, co jsme chteli zachovat).
+    """
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return _clip(raw, max_len)
+    if not isinstance(obj, dict):
+        return _clip(raw, max_len)
+    out = {}
+    for k, v in obj.items():
+        out[k] = _clip(v, max_len) if isinstance(v, str) and len(v) > max_len else v
+    try:
+        return json.dumps(out, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return _clip(raw, max_len)
+
+
+def _shrink_message(m: dict, max_len: int) -> dict:
+    """Zkrati JEDNU zpravu, aby sama neprekrocila max_len.
+
+    Proc je to potreba: kdyz je obrovska jedna zprava (typicky
+    `tool_calls[].arguments` s obsahem souboru, nebo uzivatel vlozil velky
+    text), vyber "nejnovejsi" ji bud necha (a prompt pretece), nebo zahodi
+    vsechno ostatni. Ani jedno neni dobre -> zkratime ji.
+    """
+    out = dict(m)
+    c = m.get("content")
+    if isinstance(c, str):
+        out["content"] = _clip(c, max_len)
+    elif isinstance(c, list):
+        blocks = []
+        for part in c:
+            if isinstance(part, dict):
+                p2 = dict(part)
+                for k in ("text", "content"):
+                    if isinstance(p2.get(k), str):
+                        p2[k] = _clip(p2[k], max_len)
+                blocks.append(p2)
+            elif isinstance(part, str):
+                blocks.append(_clip(part, max_len))
+            else:
+                blocks.append(part)
+        out["content"] = blocks
+    tcs = m.get("tool_calls")
+    if tcs:
+        new = []
+        for tc in tcs:
+            if not isinstance(tc, dict):
+                new.append(tc)
+                continue
+            tc2 = dict(tc)
+            fn = dict(tc2.get("function") or {})
+            if isinstance(fn.get("arguments"), str):
+                fn["arguments"] = _shrink_args(fn["arguments"], max_len)
+            tc2["function"] = fn
+            new.append(tc2)
+        out["tool_calls"] = new
+    return out
+
+
 def cap_messages(messages: list[dict], limit: int) -> tuple[list[dict], bool]:
     """Vrati (zpravy, zkraceno?). Drzi prvni system/developer zpravu + nejnovejsi.
 
@@ -118,11 +235,21 @@ def cap_messages(messages: list[dict], limit: int) -> tuple[list[dict], bool]:
     "nastroje nejsou dostupne" (presne to se delo u Qwenu po delsi konverzaci).
     """
     def _size(m):
-        c = m.get("content")
-        return len(c) if isinstance(c, str) else len(str(c or ""))
+        return _msg_size(m)
+
+    # 1) Nejdřív zkratime PRILIS VELKE jednotlive zpravy. Bez toho by jedna
+    #    obrovska zprava bud nechala prompt pretecenym, nebo zahodila vse
+    #    ostatni. (V praxi: 2 zpravy, z toho jedna 11 MB.)
+    per_msg = max(50_000, limit // 4)
+    if any(_size(m) > per_msg for m in messages):
+        messages = [_shrink_message(m, per_msg) if _size(m) > per_msg else m
+                    for m in messages]
+        shrunk = True
+    else:
+        shrunk = False
 
     if sum(_size(m) for m in messages) <= limit:
-        return messages, False
+        return messages, shrunk
 
     head = [m for m in messages if m.get("role") in ("system", "developer")][:1]
     rest = [m for m in messages if m.get("role") not in ("system", "developer")]
@@ -137,7 +264,6 @@ def cap_messages(messages: list[dict], limit: int) -> tuple[list[dict], bool]:
         used += ln
     keep.reverse()
     return head + keep, True
-
 
 def build_prompt(messages: list[dict], tools: list[dict] | None = None,
                  trailer: bool | None = None) -> str:
