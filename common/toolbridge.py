@@ -803,56 +803,104 @@ def _escape_inner_quotes(s: str) -> str:
     return "".join(out)
 
 
-# Znaky, ktere smi v JSON nasledovat po backslashi. Cokoliv jineho je
-# NEVALIDNI escape sekvence (napr. `\*`, `\.`, `\-`) a json.loads() ji odmitne.
-_VALID_ESCAPE = set('"\\/bfnrtu')
+# V tomto rezimu uz text NENI platny JSON, takze backslash bereme jako
+# LITERARNI vsude krome `\"` a `\\`, ktere v JSON neco znamenaji.
+_MEANINGFUL_ESCAPES = ('"', "\\")
 
 
 def _fix_invalid_escapes(s: str) -> str:
-    """Odstrani backslash pred znakem, ktery v JSON nic neescapuje.
+    """Zachrani backslash, ktery v JSON nic neescapuje, ZDVOJENIM.
 
-    Model pise v shell prikazech `\\*` (z `grep -n '\\*.apk'`) nebo `\\.` —
-    shell to akceptuje, ale JSON je to NEVALIDNI escape a json.loads() tim
-    zahodi CELY objekt (tool call pak zmizi nebo zustane zabaleny).
-    Backslash pred neplatnym znakem tedy zahodime; obsah prikazu to
-    nezmění (`\\*.apk` i `*.apk` je pro grep to same).
+    Model (hlavne DeepSeek) pise shell prikazy s backslashem, ktery v JSON
+    escape nic neznamena — napr. regex `\\.apk`, `\\d`, `\\*` nebo windows
+    cestu `C:\\tmp`. Striktni json.loads() takovy objekt odmitne a tool
+    call se ztrati.
+
+    POZOR: backslash se NESMI jen zahodit! Zmenila by se semantika prikazu:
+    v regexu `\\.apk` znamena LITERARNI tecku, kdezto `.apk` znamena
+    libovolny znak + "apk". Proto backslash ZDVOJIME, aby po json.loads()
+    zustal v hodnote PRESNE tak, jak ho model napsal.
+
+    `\"` a `\\\\` nechavame byt — ty v JSON neco znamenaji.
     """
     out: list[str] = []
     i = 0
     n = len(s)
     while i < n:
         ch = s[i]
-        if ch == "\\" and i + 1 < n and s[i + 1] not in _VALID_ESCAPE:
-            i += 1  # backslash zahodime, znak za nim zustava
+        if ch != "\\":
+            out.append(ch)
+            i += 1
             continue
-        out.append(ch)
-        i += 1
+        if i + 1 >= n:
+            # osamely backslash na konci -> literalni backslash
+            out.append("\\\\")
+            i += 1
+            continue
+        nxt = s[i + 1]
+        if nxt in _MEANINGFUL_ESCAPES:
+            out.append(ch)
+            out.append(nxt)
+            i += 2
+            continue
+        # model chtel LITERALNI backslash -> zdvojit (NEzahazovat!)
+        out.append("\\\\")
+        out.append(nxt)
+        i += 2
     return "".join(out)
 
 
+def _loads_first_json(s: str):
+    """json.loads, ktere si vezme JEN PRVNI JSON hodnotu a zbytek ignoruje.
+
+    Model casto posle za objektem jeste odpad — v realne session.html to bylo
+    druhe `}` navic nebo zbytek tagu:
+
+        {"command": "ls"}}            -> Extra data: line 1 column 491
+        {"command": "ls"}}<newline></ call>
+
+    Striktni json.loads() kvuli tomu zahodi CELY tool call a pi pak hlasi
+    "command: must have required properties command". raw_decode si vezme
+    prvni hodnotu a zbytek preskoci.
+    """
+    dec = json.JSONDecoder()
+    try:
+        obj, _end = dec.raw_decode(s.strip())
+        return obj
+    except json.JSONDecodeError:
+        return None
+
+
 def _loads_lenient(s: str):
-    """json.loads, ktere prezije neescapovane uvozovky uvnitr stringu.
+    """json.loads, ktere prezije odpad za objektem a neescapovane uvozovky.
 
     Model casto posle:
         {"command": "... vyhledej \"Executing git\" v .rodata ..."}
-    tedy uvozovky uvnitr hodnoty BEZ escapovani. Striktni json.loads to zahodi
-    -> tool call zmizi a pi dostane jen text („model neposlal tool call").
+    (uvozovky uvnitr hodnoty BEZ escapovani) nebo za objektem jeste druhe
+    `}` / zbytek tagu. Striktni json.loads to zahodi -> tool call zmizi
+    (nebo zustane zabaleny v `arguments`).
     """
     try:
         return json.loads(s)
     except json.JSONDecodeError:
         pass
-    try:
-        return json.loads(_escape_inner_quotes(s))
-    except json.JSONDecodeError:
-        pass
-    # 3) Neplatne escape sekvence (`\*`, `\.` …) — model je pise v shell
-    #    prikazech, ale JSON je odmita. Zahodime backslash a zkusime znovu.
-    try:
-        return json.loads(_escape_inner_quotes(_fix_invalid_escapes(s)))
-    except json.JSONDecodeError:
-        return None
-
+    # 1) odpad ZA objektem (druhe `}`, zbytek tagu) — vezmi prvni hodnotu
+    for cand in (s, _escape_inner_quotes(s)):
+        obj = _loads_first_json(cand)
+        if isinstance(obj, (dict, list)):
+            return obj
+    # 2) neplatne escape sekvence (`\\*`, `\\.`) — model je pise v shell
+    #    prikazech, ale JSON je odmita. Backslash ZDVOJIME (nezahazujeme!),
+    #    aby se nezmenila semantika prikazu.
+    for cand in (_fix_invalid_escapes(s),
+                 _escape_inner_quotes(_fix_invalid_escapes(s))):
+        try:
+            return json.loads(cand)
+        except json.JSONDecodeError:
+            obj = _loads_first_json(cand)
+            if isinstance(obj, (dict, list)):
+                return obj
+    return None
 
 # ZACHRANA pro rozbity format: hodnota argumentu jako HOLY text (bez uvozovek),
 # ukoncena tagem nebo koncem. Priklad z realne session:
