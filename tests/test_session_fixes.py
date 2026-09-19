@@ -367,6 +367,68 @@ def test_cap_system_role_also_works():
           f"kept={[m.get('role') for m in kept]}")
 
 
+# ------------------------------------ 6) "Dosažen limit délky. Začněte nový chat."
+# V praxi: shim poslal prompt s 10 963 352 znaky (11 MB!) a server odmitl.
+# Novy chat nepomuze, kdyz je moc dlouhy samotny prompt -> nutne zkracovat.
+
+LENGTH_HINT = {"type": "error", "content": "Dosažen limit délky. Začněte nový chat.",
+               "clear_response": True, "finish_reason": "length_limit"}
+
+
+def test_hint_error_detects_length_limit():
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "deepseek", "bridge"))
+    from deepseek.bridge.deepseek_api import _hint_error, _is_length_error  # noqa: PLC0415
+
+    e = _hint_error(LENGTH_HINT)
+    check("28. limit delky: rozpoznan jako length_limited",
+          e is not None and e.length_limited, f"e={e}")
+    check("29. limit delky: NENI oznacen jako rate limit",
+          e is not None and not e.rate_limited, f"rl={getattr(e, 'rate_limited', None)}")
+    check("30. limit delky: nema smysl opakovat stejny chat (retry=False)",
+          e is not None and e.retry is False)
+    # i cesky bez diakritiky a anglicky
+    check("31. limit delky: varianta bez diakritiky",
+          _is_length_error("Dosazen limit delky. Zacnete novy chat."))
+    check("32. limit delky: anglicka varianta",
+          _is_length_error("Maximum context length exceeded"))
+    check("33. limit delky: bezna chyba to neni",
+          not _is_length_error("invalid token"))
+
+
+def test_deepseek_shim_caps_context():
+    """Shim musi zkratit kontext, aby se 11MB prompt vubec neposlal."""
+    src = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "deepseek", "bridge", "openai_shim.py"), encoding="utf-8").read()
+    check("34. deepseek: shim pouziva cap_messages", "cap_messages(" in src)
+    check("35. deepseek: ma MAX_PROMPT_CHARS", "MAX_PROMPT_CHARS" in src)
+    check("36. deepseek: zkracuje az PO _convs.lookup (kvuli prefixu)",
+          src.index("_convs.lookup(messages)") < src.index("cap_messages(messages,"),
+          "cap_messages je pred lookup -> rozbije navazani chatu")
+    check("37. deepseek: bind() dostava PUVODNI historii",
+          "_convs.bind(messages," in src, "bind() musi mit original, ne zkraceny")
+
+
+def test_cap_really_shrinks_11mb():
+    """11 MB konverzace se musi vejit do limitu."""
+    from common.toolbridge import cap_messages, build_prompt  # noqa: PLC0415
+
+    msgs = [{"role": "developer", "content": "Jsi agent."}]
+    msgs += [{"role": "user", "content": "x" * 100_000} for _ in range(110)]
+    msgs.append({"role": "user", "content": "Posledni otazka."})
+    total = sum(len(str(m.get("content", ""))) for m in msgs)
+    capped, trimmed = cap_messages(msgs, 400_000)
+    capped_total = sum(len(str(m.get("content", ""))) for m in capped)
+    check("38. limit delky: 11 MB se zkrati pod limit",
+          trimmed and capped_total <= 400_000,
+          f"pred={total} po={capped_total}")
+    check("39. limit delky: posledni otazka zustava",
+          capped[-1].get("content") == "Posledni otazka.")
+    check("40. limit delky: developer zustava (schémata)",
+          any(m.get("role") == "developer" for m in capped))
+
+
 def main() -> int:
     test_dns_cache()
     test_dns_cache_survives_and_persists()
@@ -382,6 +444,9 @@ def main() -> int:
     test_cap_keeps_developer_message()
     test_cap_no_trim_when_small()
     test_cap_system_role_also_works()
+    test_hint_error_detects_length_limit()
+    test_deepseek_shim_caps_context()
+    test_cap_really_shrinks_11mb()
     print()
     if FAILED:
         print(f"SELHALO: {len(FAILED)} — " + ", ".join(FAILED))

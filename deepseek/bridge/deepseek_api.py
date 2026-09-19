@@ -26,6 +26,19 @@ AUTH_BIZ_CODES = {40001, 40004, 40008, 40009, 40011, 40013, 40301, 40302}
 # Agent dela hodne dotazu rychle za sebou, takze se to deje casto.
 RATE_LIMIT_DELAYS = (3.0, 8.0, 20.0)
 
+# Server rekne, ze chat uz je moc dlouhy. Opakovat STEJNY chat nema smysl —
+# musi se zalozit novy (a pripadne zkratit historie).
+_LENGTH_HINTS = (
+    "limit délky", "limit delky", "length limit", "context length",
+    "zacnete novy chat", "začněte nový chat", "start a new chat",
+    "too long", "maximum context", "kontext je prilis",
+)
+
+
+def _is_length_error(msg: str) -> bool:
+    low = (msg or "").lower()
+    return any(k in low for k in _LENGTH_HINTS)
+
 
 def _hint_error(obj: dict) -> "DeepSeekError | None":
     """Rozpozna chybove hlaseni v SSE.
@@ -50,6 +63,11 @@ def _hint_error(obj: dict) -> "DeepSeekError | None":
             f"chat/completion: RATE LIMIT — {text} "
             f"(agent poslal příliš mnoho dotazů rychle po sobě)",
             retry=True, rate_limited=True)
+    if _is_length_error(text):
+        # Nema smysl opakovat stejny chat — volajici musi zalozit novy
+        # (a hlavne zkratit historii, jinak novy chat narazi na stejny limit).
+        return DeepSeekError(f"chat/completion: {text}", retry=False,
+                             length_limited=True)
     return DeepSeekError(f"chat/completion: {text}", retry=False)
 
 
@@ -60,12 +78,14 @@ class DeepSeekError(RuntimeError):
     """
 
     def __init__(self, msg: str, biz_code: int | None = None, retry: bool = False,
-                 rate_limited: bool = False):
+                 rate_limited: bool = False, length_limited: bool = False):
         super().__init__(msg)
         self.biz_code = biz_code
         self.retry = retry
         # rate limit se pozna podle finish_reason=rate_limit_reached
         self.rate_limited = rate_limited
+        # "Dosažen limit délky. Začněte nový chat." -> nutny NOVY chat
+        self.length_limited = length_limited
 
     @staticmethod
     def from_resp(resp: dict, what: str) -> "DeepSeekError | None":

@@ -32,7 +32,7 @@ from bridge.deepseek_api import DeepSeekAPI
 from common.netfix import install_dns_cache
 from common.tokenauto import ensure_token
 from common.toolbridge import (TOOLS_REMINDER, StreamSplitter, _strip_stray_tags,
-                               tool_specs,
+                               cap_messages, tool_specs,
                                build_prompt, parse_tool_calls,
                                to_openai_tool_calls, tool_names)
 from deepseek.bridge.deepseek_api import DeepSeekError
@@ -41,6 +41,11 @@ from common.convcache import ConvCache
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN = os.path.join(ROOT, "secrets", "deepseek_token")
 MODEL = os.environ.get("DEEPSEEK_FREE_MODEL", "deepseek-chat")
+
+# Maximum znaku, ktere posleme v jednom promptu. Server ma vlastni limit
+# (pri ~11 MB vratil "Dosažen limit délky. Začněte nový chat."); drzime se
+# hluboko pod nim. Prepisitelne pres DEEPSEEK_MAX_PROMPT.
+MAX_PROMPT_CHARS = int(os.environ.get("DEEPSEEK_MAX_PROMPT", "400000"))
 
 _lock = threading.Lock()
 _api: DeepSeekAPI | None = None
@@ -203,31 +208,63 @@ def complete_stream(body: dict):
     thinking = _wants_thinking(body)
     temp = body.get("temperature")
 
+    # ZKRACOVANI KONTEXTU — nutne!
+    # Bez toho se historie muze vysplhat klidne na 11 MB (namereno v praxi)
+    # a server vrati "Dosažen limit délky. Začněte nový chat." Novy chat ale
+    # nepomuze, kdyz je moc dlouhy samotny prompt.
+    #
+    # POZOR NA PORADI: `_convs.lookup()` potrebuje CELOU historii (hleda
+    # prefix zprav), takze kratime az po nem — jinak by se konverzace
+    # nedohledala a prisli bychom o navazani chatu.
     session_id, parent_id, delta = _convs.lookup(messages)
     if session_id:
+        # i delta muze byt obrovska (velky vysledek nastroje)
+        delta, dtrim = cap_messages(delta, MAX_PROMPT_CHARS // 2)
         prompt = _delta_prompt(delta, bool(tools))
         print(f"[shim] delta tah v chatu {session_id[:8]}… "
-              f"({len(delta)} novych zprav, {len(prompt)} znaku)", file=sys.stderr)
+              f"({len(delta)} novych zprav, {len(prompt)} znaku"
+              f"{', ZKRACENO' if dtrim else ''})", file=sys.stderr)
         try:
             yield from _try_stream(api, session_id, prompt, parent_id, thinking, temp)
             return
         except Exception as e:  # noqa: BLE001
-            print(f"[shim] delta tah selhal ({e}) -> zkusim cely novy chat",
+            kind = "limit delky" if getattr(e, "length_limited", False) else "chyba"
+            print(f"[shim] delta tah selhal ({kind}: {e}) -> zkusim cely novy chat",
                   file=sys.stderr)
             _convs.drop(session_id)
 
     # novy chat (nebo fallback): cela historie jako jeden prompt
-    prompt = build_prompt(messages, tools)
+    full, trimmed = cap_messages(messages, MAX_PROMPT_CHARS)
+    if trimmed:
+        print(f"[shim] kontext zkracen na {MAX_PROMPT_CHARS} znaku "
+              f"({len(full)} z {len(messages)} zprav)", file=sys.stderr)
+    prompt = build_prompt(full, tools)
     session = api.create_session()
     sid = session["id"]
     print(f"[shim] novy chat {sid[:8]}… (cely kontext: {len(prompt)} znaku, "
-          f"{len(messages)} zprav)", file=sys.stderr)
+          f"{len(full)} zprav)", file=sys.stderr)
     try:
         yield from _try_stream(api, sid, prompt, None, thinking, temp)
     except Exception as e:  # noqa: BLE001
-        print(f"[shim] novy chat taky selhal ({e})", file=sys.stderr)
-        raise
+        if getattr(e, "length_limited", False):
+            # Zkraceny prompt je porad moc dlouhy -> zkusime jeste agresivneji.
+            # (Stava se, kdyz je kontext opravdu extremni.)
+            smaller = max(50_000, MAX_PROMPT_CHARS // 4)
+            print(f"[shim] i zkraceny kontext je moc dlouhy -> zkousim {smaller} znaku",
+                  file=sys.stderr)
+            full2, _ = cap_messages(messages, smaller)
+            try:
+                yield from _try_stream(api, sid, build_prompt(full2, tools),
+                                       None, thinking, temp)
+            except Exception as e2:  # noqa: BLE001
+                print(f"[shim] novy chat taky selhal ({e2})", file=sys.stderr)
+                raise
+        else:
+            print(f"[shim] novy chat taky selhal ({e})", file=sys.stderr)
+            raise
 
+    # bind() musi dostat PUVODNI historii (ne zkracenou) — jinak by pristi
+    # tah neodpovidal prefixu a zakladal by se novy chat pokazde.
     _convs.bind(messages, sid, api.last_response_message_id)
 
 
