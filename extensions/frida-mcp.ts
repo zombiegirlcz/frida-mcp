@@ -101,6 +101,13 @@ const COMPAT = {
 // a `thinkingFormat: "deepseek"` -> pi posle `thinking: {type: "enabled"}`.
 const COMPAT_THINKING = { ...COMPAT, thinkingFormat: "deepseek" };
 
+// contextWindow MUSI odpovidat capu shimu (MAX_PROMPT_CHARS), ne limitu
+// serveru: shim vraci usage.total_tokens = 0, takze si pi kontext pocita
+// odhadem chars/4 (compaction.js: estimateTokens). Kdyby contextWindow byl
+// vyssi nez cap shimu, pi by nekompaktoval a shim by starsi zpravy tise
+// odstrihl. Proto presne cap/4:
+//   DeepSeek: 2_000_000 znaku / 4 = 500_000
+//   Qwen:     1_000_000 znaku / 4 = 250_000
 export const PROVIDERS: Record<string, Record<string, unknown>> = {
   "deepseek-free": {
     name: "DeepSeek Free (nativni)",
@@ -113,7 +120,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "deepseek-chat",
         name: "DeepSeek Chat (free, nativni PoW)",
         input: ["text"],
-        contextWindow: 1048576,
+        contextWindow: 500000,
         maxTokens: 8192,
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -122,7 +129,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "deepseek-reasoner",
         name: "DeepSeek Reasoner (free, mysleni)",
         input: ["text"],
-        contextWindow: 1048576,
+        contextWindow: 500000,
         maxTokens: 8192,
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -140,7 +147,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "qwen3.7-plus",
         name: "Qwen3.7 Plus (free)",
         input: ["text"],
-        contextWindow: 1048576,
+        contextWindow: 250000,
         maxTokens: 8192,
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -149,7 +156,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "qwen3.8-max",
         name: "Qwen3.8 Max (free)",
         input: ["text"],
-        contextWindow: 1048576,
+        contextWindow: 250000,
         maxTokens: 8192,
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -158,7 +165,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "qwen3.7-max",
         name: "Qwen3.7 Max (free)",
         input: ["text"],
-        contextWindow: 1048576,
+        contextWindow: 250000,
         maxTokens: 8192,
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -167,7 +174,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "qwen3.6-plus",
         name: "Qwen3.6 Plus (free)",
         input: ["text"],
-        contextWindow: 1048576,
+        contextWindow: 250000,
         maxTokens: 8192,
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -176,7 +183,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "qwen3.5-plus",
         name: "Qwen3.5 Plus (free)",
         input: ["text"],
-        contextWindow: 1048576,
+        contextWindow: 250000,
         maxTokens: 8192,
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -185,7 +192,7 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
         id: "qwen3.5-omni-plus",
         name: "Qwen3.5 Omni Plus (free, text)",
         input: ["text"],
-        contextWindow: 1048576,
+        contextWindow: 250000,
         maxTokens: 8192,
         reasoning: true,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

@@ -71,7 +71,10 @@ _convs = ConvCache()
 # Qwen bere CELOU historii v JEDNOM promptu. U velkych session to prekroci
 # limit API, nebo to trva dele nez timeout -> pi jen visi na "working" a nic
 # neprijde. Proto prompt orezavame (drzime system + nejnovejsi zpravy).
-MAX_PROMPT_CHARS = int(os.environ.get("QWEN_MAX_PROMPT", "300000"))
+# Server limit: mereno 4M znaku OK, 6M -> timeout cteni (ne tvrdy length
+# error). Drzime 1M (rezerva) a je ZAROVNANE s contextWindow
+# v extensions/frida-mcp.ts (cap/4).
+MAX_PROMPT_CHARS = int(os.environ.get("QWEN_MAX_PROMPT", "1000000"))
 
 
 def _cap_messages(messages: list[dict], limit: int | None = None):

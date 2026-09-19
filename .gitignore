@@ -40,3 +40,8 @@ test/
 .pi/
 .frida-mcp-config.json
 mcprelay/.relay_token
+
+# ── exporty session / docasne soubory ──────────────────────
+session.html
+tmp/
+tmp_*.py

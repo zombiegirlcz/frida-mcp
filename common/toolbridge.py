@@ -374,6 +374,11 @@ def tool_specs(tools: list[dict] | None) -> dict[str, dict] | None:
         out[name] = {
             "params": set(props.keys()),
             "required": set(schema.get("required") or []),
+            # TYPY parametru — podle nich pretypujeme hodnoty, ktere model
+            # poslal jako string (napr. `"timeout": "60"` misto cisla;
+            # pi pak hlasi `timeout: must be number`).
+            "types": {k: (v or {}).get("type") for k, v in props.items()
+                      if isinstance(v, dict)},
         }
     return out or None
 
@@ -612,6 +617,53 @@ def _infer_tool(obj, specs: dict[str, dict] | None) -> str | None:
     return hits[0] if len(hits) == 1 else None
 
 
+# Hodnoty, ktere se maji pretypovat na cislo/bool, kdyz prijdou jako string.
+_NUM_TYPES = ("number", "integer")
+
+
+def _coerce_types(calls: list[dict],
+                  specs: dict[str, dict] | None) -> list[dict]:
+    """Pretypuje argumenty podle schematu nastroje.
+
+    Model (hlavne DeepSeek) casto posle cislo jako string:
+        {"command": "...", "timeout": "60</>"}
+    Schema chce `number` a pi jinak odmitne cely tool call:
+        Validation failed for tool "bash":
+          - timeout: must be number
+    (Realne 2x v session.html z 2026-09-19.) Pretypujeme jen kdyz je cilovy
+    typ znamy a hodnota se da bezpecne prevest; obsah commandu se nedotyka.
+    """
+    if not specs or not calls:
+        return calls
+    for c in calls:
+        sp = specs.get(c.get("name"))
+        if not sp:
+            continue
+        types = sp.get("types") or {}
+        args = c.get("arguments")
+        if not isinstance(args, dict):
+            continue
+        for key, want in types.items():
+            val = args.get(key)
+            if not isinstance(val, str) or not want:
+                continue
+            if want in _NUM_TYPES:
+                # odstran zbytky tagu (`60</>` -> `60`) a zkus prevest
+                clean = re.sub(r"</?[^>]{0,20}>", "", val).strip()
+                try:
+                    num = float(clean)
+                except ValueError:
+                    continue
+                args[key] = int(num) if num.is_integer() else num
+            elif want == "boolean":
+                low = val.strip().lower()
+                if low in ("true", "1", "yes"):
+                    args[key] = True
+                elif low in ("false", "0", "no"):
+                    args[key] = False
+    return calls
+
+
 def _coerce_bare(obj, specs: dict[str, dict] | None) -> dict | None:
     """HOLY JSON s argumenty (bez `"name"`) -> tool call, pokud se da dovodit."""
     name = _infer_tool(obj, specs)
@@ -645,11 +697,24 @@ def _unwrap_args(args: dict, depth: int = 0) -> dict:
         return args
     v = args[k]
     if isinstance(v, str):
-        try:
-            v = json.loads(v) if v.strip() else {}
-        except json.JSONDecodeError:
-            # neni to JSON -> necham puvodni (napr. {"_raw": ...})
-            return args
+        if not v.strip():
+            v = {}
+        else:
+            # TOLERANTNI parser, ne striktni json.loads!
+            #
+            # Model (hlavne DeepSeek) posila vnitrni JSON casto s NEVALIDNIM
+            # escapem — v shell prikazech pise `\*` (z `grep -n '\*.apk'`),
+            # coz je v shellu OK, ale v JSON je to neplatna escape sekvence.
+            # Striktni json.loads() cely objekt odmitne -> args zustanou
+            # ZABALENE ve `{"arguments": "..."}` a pi pak hlasi:
+            #   Validation failed for tool "bash":
+            #     - command: must have required properties command
+            # (Realne: 4x v session.html z 2026-09-19.)
+            parsed = _loads_lenient(v)
+            if parsed is None:
+                # fakt to neni JSON -> necham puvodni (napr. {"_raw": ...})
+                return args
+            v = parsed
     if not isinstance(v, dict) or not v:
         return args
     return _unwrap_args(v, depth + 1)
@@ -738,6 +803,33 @@ def _escape_inner_quotes(s: str) -> str:
     return "".join(out)
 
 
+# Znaky, ktere smi v JSON nasledovat po backslashi. Cokoliv jineho je
+# NEVALIDNI escape sekvence (napr. `\*`, `\.`, `\-`) a json.loads() ji odmitne.
+_VALID_ESCAPE = set('"\\/bfnrtu')
+
+
+def _fix_invalid_escapes(s: str) -> str:
+    """Odstrani backslash pred znakem, ktery v JSON nic neescapuje.
+
+    Model pise v shell prikazech `\\*` (z `grep -n '\\*.apk'`) nebo `\\.` —
+    shell to akceptuje, ale JSON je to NEVALIDNI escape a json.loads() tim
+    zahodi CELY objekt (tool call pak zmizi nebo zustane zabaleny).
+    Backslash pred neplatnym znakem tedy zahodime; obsah prikazu to
+    nezmění (`\\*.apk` i `*.apk` je pro grep to same).
+    """
+    out: list[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "\\" and i + 1 < n and s[i + 1] not in _VALID_ESCAPE:
+            i += 1  # backslash zahodime, znak za nim zustava
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _loads_lenient(s: str):
     """json.loads, ktere prezije neescapovane uvozovky uvnitr stringu.
 
@@ -752,6 +844,12 @@ def _loads_lenient(s: str):
         pass
     try:
         return json.loads(_escape_inner_quotes(s))
+    except json.JSONDecodeError:
+        pass
+    # 3) Neplatne escape sekvence (`\*`, `\.` …) — model je pise v shell
+    #    prikazech, ale JSON je odmita. Zahodime backslash a zkusime znovu.
+    try:
+        return json.loads(_escape_inner_quotes(_fix_invalid_escapes(s)))
     except json.JSONDecodeError:
         return None
 
@@ -930,7 +1028,7 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None,
             "", text, flags=re.I)
         text = _STRAY_TAG.sub("", text)
 
-    return text.strip(), calls
+    return text.strip(), _coerce_types(calls, specs)
 
 
 def _extract_calls(text: str, tool_names: set[str] | None,

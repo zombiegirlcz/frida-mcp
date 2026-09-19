@@ -42,10 +42,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN = os.path.join(ROOT, "secrets", "deepseek_token")
 MODEL = os.environ.get("DEEPSEEK_FREE_MODEL", "deepseek-chat")
 
-# Maximum znaku, ktere posleme v jednom promptu. Server ma vlastni limit
-# (pri ~11 MB vratil "Dosažen limit délky. Začněte nový chat."); drzime se
-# hluboko pod nim. Prepisitelne pres DEEPSEEK_MAX_PROMPT.
-MAX_PROMPT_CHARS = int(os.environ.get("DEEPSEEK_MAX_PROMPT", "400000"))
+# Maximum znaku, ktere posleme v jednom promptu. Server ma vlastni limit:
+# mereno s REALNYM diverznim textem (kod + cestina) 3.5M znaku OK,
+# 4M znaku -> "Dosažen limit délky". Drzime se na 2M (rezerva ~2x) a toto
+# cislo je ZAROVNANE s contextWindow v extensions/frida-mcp.ts (cap/4).
+# Prepisitelne pres DEEPSEEK_MAX_PROMPT.
+MAX_PROMPT_CHARS = int(os.environ.get("DEEPSEEK_MAX_PROMPT", "2000000"))
 
 _lock = threading.Lock()
 _api: DeepSeekAPI | None = None

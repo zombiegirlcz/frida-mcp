@@ -358,6 +358,42 @@ for _raw, _want in [
     else:
         print(f"✅ realny tool call po fixu: {_want}")
 
+
+# 26) REGRESE z REALNE session.html (2026-09-19): 8x "Validation failed"
+#     proto, ze se argumenty do nastroje poslaly spatne. Tri vzory:
+#
+#     a) args ZABALENE JESTE JEDNOU (4x) — model posle
+#        {"arguments": "{\"command\": \"...\"}"} nebo
+#        {"arguments": {"command": "..."}} misto primych argumentu.
+#        `_coerce` to umi rozbalit (_unwrap_args), ale cesta pres
+#        <parameter> a holou JSON NE — tam se _unwrap_args nevolal.
+#     b) SPATNY TYP (2x) — {"timeout": "5"} misto cisla; schema chce number.
+#     c) prilis malo argumentu (2x) — chyba modelu, neresime.
+#
+#     Overujeme PRIMO strukturu argumentu, ne jen nazev nastroje (slaby
+#     test vyse by tohle propustil).
+print()
+print("=== 26) regrese: argumenty se musi poslat ROZBALENE a se spravnym typem ===")
+
+_ARG_CASES = [
+    # (popis, raw, ocekavany nazev, ocekavany klic, ocekavana hodnota)
+    ("args zabalene ve stringu (invoke cesta)",
+     '<tool_call>{"name":"bash","arguments":{"arguments":"{\\"command\\": \\"ls -la /tmp\\"}"}}</tool_call>',
+     "bash", "command", "ls -la /tmp"),
+    ("args zabalene v objektu (invoke cesta)",
+     '<tool_call>{"name":"bash","arguments":{"arguments":{"command":"pwd"}}}</tool_call>',
+     "bash", "command", "pwd"),
+]
+for _lbl, _raw, _want_name, _key, _val in _ARG_CASES:
+    _t, _c = parse_tool_calls(_raw, TOOLS, SPECS)
+    _ok = (len(_c) == 1 and _c[0]["name"] == _want_name
+           and _c[0]["arguments"].get(_key) == _val)
+    if _ok:
+        print(f"✅ {_lbl}")
+    else:
+        FAILED.append(_lbl)
+        print(f"❌ {_lbl}\n     dostal: {_c}")
+
 print()
 if FAILED:
     print(f"SELHALO: {len(FAILED)} — {', '.join(FAILED)}")
