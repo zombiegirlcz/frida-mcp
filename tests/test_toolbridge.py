@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 import os
+import json as _json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -46,6 +47,10 @@ TOOL_SCHEMAS = [
 ]
 SPECS = tool_specs(TOOL_SCHEMAS)
 FAILED: list[str] = []
+
+def U(s: str) -> str:
+    """Identity helper: realne fullwidth znaky uz jsou v literalu."""
+    return s
 
 
 def check(label: str, raw: str, want_calls: list[str], want_text: str | None = None,
@@ -258,6 +263,100 @@ check("JSON s tagy uvnitr zustava validni",
       '<tool_call>{"name":"write","arguments":{"path":"/tmp/x",'
       '"content":"text s <invoke> a <\uff5cDSML\uff5ccalls> tagem"}}</tool_call>',
       ["write"])
+
+
+# ---------------------------------------------------------------------------
+# 22) REGRESE (dukladnejsi): PROZA zminujici tagy invoke/parameter.
+#
+#     Presne tenhle pripad zpusobil, ze se odpoved "zastavila":
+#       - splitter videl hole <invoke bez name= a zacal drzet stream
+#       - uklidovy regex urezl text od prvniho <invoke> do konce odpovedi
+#     Testujeme VICE variant prozy, ne jen jednu, protoze kazda mohla
+#     projit jinou vetvi parseru (tag na zacatku / uprostred / na konci).
+_PROSE_VARIANTS = [
+    "Tagy `<invoke>` a `<parameter>` se v XML pouzivaji jako obal. KONEC-123",
+    "<invoke> je obal a <parameter> hodnota. KONEC-123",
+    "Nejdriv text. Pak <invoke name='bash'> bez zavorky. KONEC-123",
+    "Vysvetleni <tool_calls> a <parameter> na konci vety.",
+    "Zminim <parameter name='command'> ale neni to platny JSON call.",
+]
+for _i, _p in enumerate(_PROSE_VARIANTS):
+    _t, _c = parse_tool_calls(_p, TOOLS, SPECS)
+    if _t != _p or _c:
+        FAILED.append(f"proza #{_i}")
+        print(f"❌ proza #{_i}: text={_t[:70]!r} calls={len(_c)}")
+    else:
+        print(f"✅ proza #{_i} zustava CELE ({len(_p)} znaku)")
+
+# 23) REGRESE (dukladnejsi): splitter nesmi drzet stream na ZADNE variante
+#     prozy s tagy — jinak se odpoved "zastavi" a nedorazi vubec nic.
+for _i, _p in enumerate(_PROSE_VARIANTS):
+    for _sz in (1, 2, 3, 7, 64):
+        _sp = StreamSplitter(TOOLS, SPECS)
+        _o = ""
+        for _j in range(0, len(_p), _sz):
+            _o += _sp.feed(_p[_j:_j + _sz])
+        _tl, _cl = _sp.finish()
+        _o += _tl
+        if _o != _p or _cl or _sp.holding:
+            FAILED.append(f"proza stream #{_i}/{_sz}")
+            print(f"❌ proza stream #{_i} sz={_sz}: out={_o[:50]!r} hold={_sp.holding}")
+            break
+    else:
+        continue
+    break
+else:
+    print("✅ proza s tagy nezablokuje stream (5 variant x 5 delek)")
+
+# 24) REGRESE (dukladnejsi): EMBEDDED TAGY uvnitr JSON tool callu.
+#     Normalizace (DSML / oprava zkomolenych tagu) musi JSON obejit — jinak
+#     by se obsah souboru odeslal zkomoleny. Overujeme to `json.loads`,
+#     ne jen tim, ze call existuje (slaby test 21 vyse).
+_EMBED = [
+    "text s <invoke> uvnitr",
+    "<parameter name='x'>hodnota</parameter>",
+    f"DSML marker ｜DSML｜ calls> uvnitr",
+    "<tool_call>{</tool_call> uvnitr JSONu",
+    "mix <calls> a ｜DSML｜ invoke name='bash'>",
+]
+for _i, _content in enumerate(_EMBED):
+    _raw = ('<tool_call>{"name":"write","arguments":{"path":"/tmp/e",'
+            '"content":' + _json.dumps(_content) + '}}</tool_call>')
+    _t, _c = parse_tool_calls(_raw, TOOLS | {"write"}, SPECS)
+    if len(_c) != 1 or _c[0]["name"] != "write":
+        FAILED.append(f"embed #{_i}: call")
+        print(f"❌ embed #{_i}: calls={_c}")
+        continue
+    _args = _c[0]["arguments"]
+    if isinstance(_args, str):
+        try:
+            _args = _json.loads(_args)
+        except Exception as _e:
+            FAILED.append(f"embed #{_i}: json")
+            print(f"❌ embed #{_i}: arguments nejsou validni JSON: {_e}; {_args[:80]!r}")
+            continue
+    _got = _args.get("content")
+    if _got != _content:
+        FAILED.append(f"embed #{_i}: content")
+        print(f"❌ embed #{_i}: obsah zkomolen\n     cekano: {_content!r}\n     dostal: {_got!r}")
+    else:
+        print(f"✅ embed #{_i}: JSON validni, obsah byte-identical")
+
+# 25) REGRESE: porad musi fungovat REALNY tool call (fix nesmi rozbit happy path).
+for _raw, _want in [
+    ('<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call>', "bash"),
+    (U('''<tool_calls>
+<invoke name="bash">
+<parameter name="command">ls</parameter>
+</invoke>
+</tool_calls>'''), "bash"),
+]:
+    _t, _c = parse_tool_calls(_raw, TOOLS, SPECS)
+    if len(_c) != 1 or _c[0]["name"] != _want:
+        FAILED.append("realny call po fixu")
+        print(f"❌ realny call: {_c}")
+    else:
+        print(f"✅ realny tool call po fixu: {_want}")
 
 print()
 if FAILED:
