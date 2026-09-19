@@ -499,6 +499,79 @@ def test_shrink_size_matches_text_content():
     check("49. cap: hlaseno zkraceni", trimmed is True)
 
 
+# --------------------------- 8) _shrink_args: JSON musi zustat VALIDNI
+# Uzivatel: "v testu u _shrink_args pridej json.loads(args) — ted jen
+# kontrolujes, ze arguments nejsou prazdne, ne ze zustaly validni JSON."
+# Je to dulezite: `build_prompt()` dela `json.loads(fn["arguments"])`, a kdyz
+# JSON rozbijeme, spadne do `args = {}` a zahodi obsah UPLNE.
+
+def test_shrink_args_keeps_valid_json():
+    from common.toolbridge import _shrink_args  # noqa: PLC0415
+
+    big = "x" * 2_000_000
+    raw = json.dumps({"path": "/tmp/a", "content": big})
+    out = _shrink_args(raw, 10_000)
+
+    # 1) MUSI to byt validni JSON (ne useknuty string)
+    try:
+        parsed = json.loads(out)
+    except json.JSONDecodeError as e:
+        parsed = None
+        check("50. _shrink_args: vystup je validni JSON", False, f"{e}: {out[:80]!r}")
+    if parsed is not None:
+        check("50. _shrink_args: vystup je validni JSON", isinstance(parsed, dict),
+              f"typ={type(parsed).__name__}")
+
+    # 2) struktura zustava — vsechny klice a jejich typy
+    check("51. _shrink_args: klice zustavaji",
+          isinstance(parsed, dict) and set(parsed) == {"path", "content"},
+          f"klice={list(parsed) if isinstance(parsed, dict) else None}")
+    check("52. _shrink_args: kratky string se NEMENI",
+          isinstance(parsed, dict) and parsed.get("path") == "/tmp/a",
+          f"path={parsed.get('path') if isinstance(parsed, dict) else None!r}")
+
+    # 3) dlouha hodnota se zmensi a je videt, ze se kratilo
+    got = parsed.get("content") if isinstance(parsed, dict) else None
+    check("53. _shrink_args: dlouha hodnota se zmensi",
+          isinstance(got, str) and len(got) < 20_000,
+          f"delka={len(got) if isinstance(got, str) else None}")
+    check("54. _shrink_args: je videt znacka zkraceni",
+          isinstance(got, str) and "zkráceno" in got, "chybi znacka")
+    check("55. _shrink_args: zachovan zacatek i konec",
+          isinstance(got, str) and got.startswith("xxx") and got.endswith("xxx"),
+          f"start={got[:6]!r} konec={got[-6:]!r}" if isinstance(got, str) else "n/a")
+
+
+def test_shrink_args_fallbacks():
+    """Rozbity / nezvykly vstup nesmi shodit _shrink_args."""
+    from common.toolbridge import _shrink_args  # noqa: PLC0415
+
+    # rozbity JSON -> zkrati se raw string (a nic nespadne)
+    broken = '{"command": "' + "y" * 50_000
+    out = _shrink_args(broken, 1_000)
+    check("56. _shrink_args: rozbity JSON nespadne",
+          isinstance(out, str) and len(out) < 5_000, f"delka={len(out)}")
+
+    # JSON ktery neni objekt (napr. seznam) -> zkrati se raw
+    out2 = _shrink_args(json.dumps(["a"] * 20_000), 1_000)
+    check("57. _shrink_args: neobjektovy JSON nespadne",
+          isinstance(out2, str) and len(out2) < 5_000, f"delka={len(out2)}")
+
+    # prazdny objekt projde beze zmeny
+    check("58. _shrink_args: prazdny objekt zustava",
+          json.loads(_shrink_args("{}", 100)) == {})
+
+    # nezmineny kratky vstup se vrati presne
+    small = json.dumps({"command": "ls -la"})
+    check("59. _shrink_args: maly vstup beze zmeny",
+          _shrink_args(small, 10_000) == small)
+
+    # hodnoty ktere nejsou stringy (cisla, bool, null, vnorene) se nekrátí
+    mixed = json.dumps({"n": 12345, "b": True, "z": None, "o": {"k": "v"}})
+    check("60. _shrink_args: nestringove hodnoty se nekrátí",
+          json.loads(_shrink_args(mixed, 10_000)) == json.loads(mixed))
+
+
 def main() -> int:
     test_dns_cache()
     test_dns_cache_survives_and_persists()
@@ -520,6 +593,8 @@ def main() -> int:
     test_size_counts_tool_call_arguments()
     test_cap_real_11mb_case()
     test_shrink_size_matches_text_content()
+    test_shrink_args_keeps_valid_json()
+    test_shrink_args_fallbacks()
     print()
     if FAILED:
         print(f"SELHALO: {len(FAILED)} — " + ", ".join(FAILED))

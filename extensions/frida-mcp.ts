@@ -26,6 +26,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -48,6 +49,7 @@ function packageRoot(): string {
 }
 
 const ROOT = packageRoot();
+const COMMON_DIR = join(ROOT, "common");
 const MODELS_JSON = join(homedir(), ".pi", "agent", "models.json");
 const CONFIG_JSON = join(ROOT, ".frida-mcp-config.json");
 const LOG_FILE = join(ROOT, "logs", "extension.log");
@@ -482,6 +484,98 @@ export function stopShims(): number {
   return killed;
 }
 
+/**
+ * Nejmladsi mtime mezi .py soubory v zadanych slozkach (0 = nic nenalezeno).
+ *
+ * Skenujeme ZAMERNE jen primy obsah slozek a jen `.py` — kdybychom brali
+ * `logs/`, shim do nich pise porad a mtime by byl vzdy cerstvy, takze by se
+ * shim restartoval v kazdem tahu (a prisli bychom o delta chat).
+ */
+function newestPyMtime(dirs: string[]): number {
+  let newest = 0;
+  for (const dir of dirs) {
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.endsWith(".py")) continue;
+      try {
+        const st = statSync(join(dir, e));
+        if (st.mtimeMs > newest) newest = st.mtimeMs;
+      } catch {
+        /* soubor mezitim zmizel */
+      }
+    }
+  }
+  return newest;
+}
+
+/** PID procesu, jehoz cmdline obsahuje dany nazev skriptu (jinak null). */
+function findShimPid(scriptName: string): number | null {
+  let pids: string[] = [];
+  try {
+    pids = readdirSync("/proc").filter((p) => /^\d+$/.test(p));
+  } catch {
+    return null;
+  }
+  for (const p of pids) {
+    const pid = Number(p);
+    if (pid === process.pid) continue;
+    let cmd = "";
+    try {
+      cmd = readFileSync(`/proc/${p}/cmdline`, "utf8");
+    } catch {
+      continue; // proces mezitim zmizel
+    }
+    if (cmd.includes(scriptName)) return pid;
+  }
+  return null;
+}
+
+/**
+ * Cas startu procesu v ms (nebo null).
+ *
+ * Pouzivame mtime `/proc/<pid>` — overeno na device, ze odpovida startu
+ * procesu (cerstvy proces -> stari ~0.7 s). Presnejsi cesta pres
+ * `/proc/<pid>/stat` (pole 22, starttime v tickach) v proot guestu
+ * vychazela spatne (nesmyslne hodnoty), proto ji nepouzivame.
+ */
+function procStartMs(pid: number): number | null {
+  try {
+    return statSync(`/proc/${pid}`).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Zjisti, zda bezici shim pouziva ZASTARALY kod.
+ *
+ * Proc to je potreba: `startShims()` bez `force` jen zkontroluje, ze je port
+ * otevreny, a proces v pameti necha bezet. Po `pi update` se tak stane, ze
+ * shim bezi klidne nekolik dni se STARYM kodem — presne to se stalo
+ * (`cap_messages` opraven v souboru, ale proces ho nikdy nenacetl).
+ *
+ * Vraci popis duvodu restartu, nebo null kdyz je vse v poradku / shim nebezi.
+ */
+export function shimStaleReason(script: string, extraDirs: string[]): string | null {
+  const scriptName = script.split("/").pop() ?? script;
+  const pid = findShimPid(scriptName);
+  if (pid === null) return null; // nebezi -> startShims ho normalne nastartuje
+  const started = procStartMs(pid);
+  if (started === null) return null;
+  const newest = newestPyMtime([dirname(script), ...extraDirs]);
+  if (newest <= 0) return null;
+  // 1 s rezerva: soubory se mohou zapsat ve stejne sekunde jako start
+  if (newest > started + 1000) {
+    return `kód je novější než proces (pid ${pid})`;
+  }
+  return null;
+}
+
 export async function startShims(py: string, force = false): Promise<string[]> {
   const out: string[] = [];
   if (force) {
@@ -494,6 +588,22 @@ export async function startShims(py: string, force = false): Promise<string[]> {
     [DEEPSEEK_PORT, join(ROOT, "deepseek", "bridge", "openai_shim.py"), "deepseek-free"],
     [QWEN_PORT, join(ROOT, "qwen", "bridge", "qwen_shim.py"), "qwen-free"],
   ];
+  // Kdyz bezi zastaraly kod, restartujeme VSECHNO (stopShims umi jen vse) —
+  // shimy se startuji rychle a `_convs` se uklada na disk, takze o delta
+  // chaty neprijdeme.
+  if (!force) {
+    for (const [, script, name] of jobs) {
+      const why = shimStaleReason(script, [COMMON_DIR]);
+      if (why) {
+        out.push(`${name}: ${why} -> restartuji shimy`);
+        log(`zastaraly kod u ${name} (${why}) -> restart shimu`);
+        const n = stopShims();
+        if (n > 0) out.push(`zastaveno starych shimu: ${n}`);
+        await new Promise((r) => setTimeout(r, 1200));
+        break;
+      }
+    }
+  }
   for (const [port, script, name] of jobs) {
     if (!force && (await portOpen(port))) {
       out.push(`${name}: už běží (${port})`);
