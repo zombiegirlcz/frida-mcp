@@ -312,6 +312,9 @@ def build_prompt(messages: list[dict], tools: list[dict] | None = None,
             em = _ECHO.search(content)
             if em:
                 content = content[: em.start()].rstrip()
+            # navic odstran halucinace "Tool X does not exists." (viz
+            # _TOOL_NOTFOUND) — bez toho by se otrava posilala zpet modelu
+            content = _TOOL_NOTFOUND.sub("", content).strip()
             block = f"[ASSISTANT]\n{content}" if content else "[ASSISTANT]"
             for tc in m.get("tool_calls") or []:
                 fn = tc.get("function") or {}
@@ -971,9 +974,17 @@ _LEAK = re.compile(
 _ECHO = re.compile(
     r"\[(?:VYSLEDEK NASTROJE|TOOL RESULT|ASSISTANT|USER|SYSTEM"
     r"|INSTRUKCE PRO TENTO TAH|INSTRUKCE)[^\]]*\]"
-    # model obcas zacne opisovat nase zaverecne instrukce i bez zavorek
-    r"|Odpovidas jako posledni\b"
-    r"|NIKDY sam nevypisuj\b",
+
+# Halucinace "Tool X does not exists." — model si v dlouhem kontextu vymysli,
+# ze nastroj neexistuje. Kopiruje chybovou hlasku, kterou NIKDY nedostal: pi
+# pri neznamem nastroji jen tise ignoruje ("Unknown tool names are ignored",
+# agent-session.js). Neni v [..], takze ji _ECHO nezachyti -> zustane ve
+# viditelnem textu, ulozi se do session a dalsi tah ji posle zpet modelu ->
+# ten se podle ni opakuje a zesiluje ji. V realne session se
+# "Tool bash does not exists." zopakovalo 5x za sebou a cely tah byl jen
+# slepenec techto halucinaci bez jedineho tool callu.
+_TOOL_NOTFOUND = re.compile(
+    r"Tool\s+[A-Za-z0-9_][A-Za-z0-9_\-]*\s+does\s+not\s+exists?\.?[ \t]*",
     re.I,
 )
 
@@ -1033,6 +1044,9 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None,
     calls = head_calls or _extract_calls(text, tool_names, specs)
 
     text = _LEAK.sub("", visible)
+    # halucinace "Tool X does not exists." nesmi zustat ve viditelnem textu
+    # (model by ji v dalsim tahu uvidel a opakoval)
+    text = _TOOL_NOTFOUND.sub("", text)
 
     # HOLY JSON tool call (bez "name") — odstran z viditelneho textu cely objekt,
     # jinak zustane prikaz videt (a model se podle nej zacne opakovat)
