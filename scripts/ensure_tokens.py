@@ -36,11 +36,6 @@ import time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Spolecny vyber tokenu (jedno misto pro cely repo).
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
-from common.qwen_token import pick_newest_token  # noqa: E402
-
 # mozne umisteni /data (host) z proot guestu
 DATA_ROOTS = [
     os.environ.get("FRIDA_MCP_DATA", ""),
@@ -238,11 +233,9 @@ def deepseek_token(force: bool, check: bool) -> bool:
 
 def qwen_token(force: bool, check: bool) -> bool:
     tok_file = QWEN["token"]
-    # ZADNY "fresh" skip pro qwen: token v Cookies DB se meni pri
-    # kazdem prihlaseni/obnove a disk muze mit jinou identitu
-    # (realne: disk id=bfc28bc8-… vs DB id=0289d7f3-…). Kdyz se
-    # cteni preskoci, novy ucet se nikdy neprojevi. Cteni DB je
-    # par ms, takze ho delame vzdy.
+    if not force and fresh(tok_file, 3600 * 12):
+        log("qwen: token je cerstvy, preskakuji")
+        return True
     src = sudo_read_first(QWEN["pkg"], QWEN["cookies"])
     if src is None:
         log("qwen: Cookies DB nenalezeno (je appka nainstalovana?)")
@@ -254,15 +247,19 @@ def qwen_token(force: bool, check: bool) -> bool:
         tmp = t.name
     try:
         con = sqlite3.connect(tmp)
-        # NEJNOVEJSI token (last_update_utc), NE podle delky —
-        # vsechny JWT maji stejnou delku, takze `length DESC`
-        # vybiral nahodne.
-        tok = pick_newest_token(con)
+        rows = con.execute(
+            "SELECT value FROM cookies WHERE name='token' AND host_key LIKE '%qwen%' "
+            "ORDER BY length(value) DESC"
+        ).fetchall()
     except Exception as e:  # noqa: BLE001
         log(f"qwen: sqlite chyba: {e}")
         return os.path.exists(tok_file)
     finally:
         os.unlink(tmp)
+    if not rows:
+        log("qwen: cookie `token` neni — prihlas se v Qwen appce (anonymni rezim ma denni limit)")
+        return os.path.exists(tok_file)
+    tok = rows[0][0]
     if check:
         log(f"qwen: nasel bych token {tok[:14]}… ({len(tok)} B)")
         return True

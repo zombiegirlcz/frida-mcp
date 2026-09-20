@@ -30,8 +30,7 @@ for _p in (_PKG, _REPO):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from bridge.qwen_api import (DEFAULT_MODEL, TOKEN_CACHE, QwenAPI,
-                            QwenError)
+from bridge.qwen_api import DEFAULT_MODEL, QwenAPI, QwenError
 from common.convcache import ConvCache
 from common.netfix import install_dns_cache
 from common.toolbridge import (StreamSplitter, build_prompt, cap_messages,
@@ -52,25 +51,13 @@ MODELS = [
 ]
 _lock = threading.Lock()
 _api: QwenAPI | None = None
-_api_stamp: float = 0.0
 
 
 def get_api() -> QwenAPI:
-    """Vrati QwenAPI; kdyz se zmenil token na disku, vytvori ho ZNOVU.
-
-    Bez tohoto by shim po `/frida-mcp tokens` (nebo po obnove/prehlaseni
-    uctu v appce) porad jel na starem tokenu v pameti — `_api` se vytvari
-    jen jednou a uz se nikdy neobnovi.
-    """
-    global _api, _api_stamp
+    global _api
     with _lock:
-        try:
-            stamp = os.path.getmtime(TOKEN_CACHE)
-        except OSError:
-            stamp = 0.0
-        if _api is None or stamp != _api_stamp:
+        if _api is None:
             _api = QwenAPI()
-            _api_stamp = stamp
         return _api
 
 
