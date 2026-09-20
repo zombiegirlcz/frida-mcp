@@ -974,7 +974,7 @@ _LEAK = re.compile(
 _ECHO = re.compile(
     r"\[(?:VYSLEDEK NASTROJE|TOOL RESULT|ASSISTANT|USER|SYSTEM"
     r"|INSTRUKCE PRO TENTO TAH|INSTRUKCE)[^\]]*\]"
-
+)
 # Halucinace "Tool X does not exists." — model si v dlouhem kontextu vymysli,
 # ze nastroj neexistuje. Kopiruje chybovou hlasku, kterou NIKDY nedostal: pi
 # pri neznamem nastroji jen tise ignoruje ("Unknown tool names are ignored",
