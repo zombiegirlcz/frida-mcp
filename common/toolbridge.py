@@ -974,6 +974,10 @@ _LEAK = re.compile(
 _ECHO = re.compile(
     r"\[(?:VYSLEDEK NASTROJE|TOOL RESULT|ASSISTANT|USER|SYSTEM"
     r"|INSTRUKCE PRO TENTO TAH|INSTRUKCE)[^\]]*\]"
+    # model obcas zacne opisovat nase zaverecne instrukce i bez zavorek
+    r"|Odpovidas jako posledni\b"
+    r"|NIKDY sam nevypisuj\b",
+    re.I,
 )
 # Halucinace "Tool X does not exists." — model si v dlouhem kontextu vymysli,
 # ze nastroj neexistuje. Kopiruje chybovou hlasku, kterou NIKDY nedostal: pi

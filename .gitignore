@@ -45,3 +45,9 @@ mcprelay/.relay_token
 session.html
 tmp/
 tmp_*.py
+\n# docasne bloky pri patchovani\n_newblock.txt\ntests/_newblock.txt\n
+# docasne artefakty pri patchovani
+tests/_newblock.txt
+tests/_fix_qwen_tokens.py
+
+tests/_patch_echo.py
