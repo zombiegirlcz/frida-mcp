@@ -174,7 +174,7 @@ class QwenAPI:
         return hdrs
 
     # -- HTTP ---------------------------------------------------------------
-    def _request(self, method: str, path: str, body: dict | None, timeout: float = 90):
+    def _request(self, method: str, path: str, body: dict | None, timeout: float = 300):
         data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode() if body is not None else None
         req = urllib.request.Request(BASE + path, data=data, method=method,
                                      headers=self._headers(stream=True))
@@ -198,7 +198,7 @@ class QwenAPI:
         return obj["data"]["id"]
 
     def completion(self, chat_id: str, prompt: str, model: str | None = None,
-                   thinking: bool = False, search: bool = False, timeout: float = 120):
+                   thinking: bool = False, search: bool = False, timeout: float = 300):
         """Generator: {'phase': 'think'|'answer'|'', 'text': str}."""
         m = model or self.model
         ts = int(time.time())

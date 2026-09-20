@@ -17,6 +17,7 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -87,7 +88,15 @@ _convs = ConvCache()
 # Server limit: mereno 4M znaku OK, 6M -> timeout cteni (ne tvrdy length
 # error). Drzime 1M (rezerva) a je ZAROVNANE s contextWindow
 # v extensions/frida-mcp.ts (cap/4).
-MAX_PROMPT_CHARS = int(os.environ.get("QWEN_MAX_PROMPT", "1000000"))
+MAX_PROMPT_CHARS = int(os.environ.get("QWEN_MAX_PROMPT", "400000"))
+
+# Kolik znaku smi mit kontext pri JEDNOM pokusu o opravu po selhani.
+# Opakovat plny megaprompt nema smysl: kdyz vyprsel jednou, vyprsi znovu.
+RETRY_PROMPT_CHARS = int(os.environ.get("QWEN_RETRY_PROMPT", "150000"))
+
+# Po jake dobe ticha posleme klientovi SSE komentar (`: ping`). Qwen u
+# velkych promptu dlouho neposle nic a pi by spojeni ukoncilo.
+HEARTBEAT_S = float(os.environ.get("QWEN_HEARTBEAT", "10"))
 
 
 def _cap_messages(messages: list[dict], limit: int | None = None):
@@ -140,9 +149,9 @@ def complete_stream(messages: list[dict], model: str, thinking: bool, tools: lis
           f"{len(messages)} zprav{', ZKRACENO' if trimmed else ''})", file=sys.stderr)
     got = False
 
-    def _run(sid):
+    def _run(sid, text_prompt):
         """Preklad faze Qwenu na (kind, text); mysleni jde jako 'think'."""
-        for ch in api.completion(sid, prompt, model=model, thinking=thinking):
+        for ch in api.completion(sid, text_prompt, model=model, thinking=thinking):
             txt = ch.get("text") or ""
             if not txt:
                 continue
@@ -152,15 +161,20 @@ def complete_stream(messages: list[dict], model: str, thinking: bool, tools: lis
                 yield "answer", txt
 
     try:
-        for kind, txt in _run(session_id):
+        for kind, txt in _run(session_id, prompt):
             got = True
             yield kind, txt
     except Exception as e:  # noqa: BLE001
-        # chat uz nemusi existovat / vyprsel -> zaloz novy a zkus znovu
-        print(f"[qwen-shim] stream selhal ({e}) -> novy chat", file=sys.stderr)
+        # chat uz nemusi existovat / vyprsel / timeout -> zaloz novy a zkus
+        # znovu, ale s KRATSim kontextem. Opakovat plny megaprompt nema smysl:
+        # kdyz vyprsel jednou, vyprsi znovu (a pi zbytecne ceka dalsi minuty).
+        print(f"[qwen-shim] stream selhal ({e}) -> novy chat (kratsi kontext)",
+              file=sys.stderr)
         _convs.drop(session_id)
         session_id = api.new_chat()
-        for kind, txt in _run(session_id):
+        retry_msgs, _ = _cap_messages(messages, RETRY_PROMPT_CHARS)
+        retry_prompt = build_prompt(retry_msgs, tools)
+        for kind, txt in _run(session_id, retry_prompt):
             got = True
             yield kind, txt
     if got:
@@ -275,6 +289,22 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
             sent_finish = False
+            client_gone = False
+
+            def _write(payload: bytes) -> None:
+                """Posle bajty klientovi; kdyz spojeni umrelo, jen to oznacime.
+
+                Bez tohoto by ConnectionResetError/BrokenPipeError vylety z
+                do_POST a zabilo vlakno requestu (a do logu hazelo traceback).
+                """
+                nonlocal client_gone
+                if client_gone:
+                    return
+                try:
+                    self.wfile.write(payload)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    client_gone = True
 
             def emit(delta: dict, finish=None) -> None:
                 # `sent_finish` je kvuli pojistce nize: pi jinak hlasi
@@ -283,19 +313,49 @@ class Handler(BaseHTTPRequestHandler):
                 obj = {"id": cid, "object": "chat.completion.chunk", "created": created,
                        "model": model,
                        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
-                self.wfile.write(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode())
-                self.wfile.flush()
+                _write(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode())
                 if finish:
                     sent_finish = True
 
             emit({"role": "assistant", "content": ""})
             sp = StreamSplitter(tool_names(tools), tool_specs(tools))
+
+            # Upstream (Qwen) bezi ve zvlastnim vlakne a sype chunky do fronty.
+            # Hlavni vlakno je vybira s kratkym timeoutem, aby mohlo posilat
+            # SSE komentar (`: ping`) — Qwen u velkych promptu dlouho mlci a pi
+            # by jinak spojeni ukoncilo ("Stream ended without finish_reason").
+            q: "queue.Queue" = queue.Queue()
+            _SENTINEL = object()
+
+            def _pump() -> None:
+                try:
+                    for item in complete_stream(messages, model, thinking, tools):
+                        q.put(item)
+                except BaseException as e:  # noqa: BLE001
+                    q.put(e)
+                finally:
+                    q.put(_SENTINEL)
+
+            threading.Thread(target=_pump, daemon=True).start()
+
             try:
                 # complete_stream vraci (kind, text): 'think' = mysleni modelu,
                 # 'answer' = odpoved. Mysleni posilame jako `reasoning_content`
                 # (pi z toho udela thinking blok); splitter/cally jedou jen
                 # na odpovedi.
-                for kind, piece_in in complete_stream(messages, model, thinking, tools):
+                while True:
+                    if client_gone:
+                        break
+                    try:
+                        item = q.get(timeout=HEARTBEAT_S)
+                    except queue.Empty:
+                        _write(b": ping\n\n")   # SSE komentar, pi ho ignoruje
+                        continue
+                    if item is _SENTINEL:
+                        break
+                    if isinstance(item, BaseException):
+                        raise item
+                    kind, piece_in = item
                     if kind == "think":
                         if piece_in:
                             emit({"reasoning_content": piece_in})
@@ -303,16 +363,18 @@ class Handler(BaseHTTPRequestHandler):
                     piece = sp.feed(piece_in)
                     if piece:
                         emit({"content": piece})
-                tail, calls = sp.finish()
-                if tail:
-                    emit({"content": tail})
-                if calls:
-                    for i, tc in enumerate(to_openai_tool_calls(calls)):
-                        emit({"tool_calls": [{"index": i, "id": tc["id"], "type": "function",
-                                               "function": tc["function"]}]})
-                    emit({}, "tool_calls")
-                else:
-                    emit({}, "stop")
+
+                if not client_gone:
+                    tail, calls = sp.finish()
+                    if tail:
+                        emit({"content": tail})
+                    if calls:
+                        for i, tc in enumerate(to_openai_tool_calls(calls)):
+                            emit({"tool_calls": [{"index": i, "id": tc["id"], "type": "function",
+                                                   "function": tc["function"]}]})
+                        emit({}, "tool_calls")
+                    else:
+                        emit({}, "stop")
             except QwenError as e:
                 emit({"content": f"\n\n[chyba Qwen API: {e}]"})
                 emit({}, "stop")
@@ -324,12 +386,8 @@ class Handler(BaseHTTPRequestHandler):
                 # nejaka cesta vynecha (nebo klient ztrati spojeni), pi hlasi
                 # "Stream ended without finish_reason" a chova se zmatene.
                 if not sent_finish:
-                    try:
-                        emit({}, "stop")
-                    except Exception:  # noqa: BLE001
-                        pass
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
+                    emit({}, "stop")
+            _write(b"data: [DONE]\n\n")
             return
 
         try:
