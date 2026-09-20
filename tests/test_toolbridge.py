@@ -288,6 +288,19 @@ for _i, _p in enumerate(_PROSE_VARIANTS):
     else:
         print(f"✅ proza #{_i} zustava CELE ({len(_p)} znaku)")
 
+# 22b) MALFORMED invoke BEZ <parameter> → agent dostane zpětnou chybovou hlášku.
+#     Před fixem byl `continue` → tichý pád, text se pošle jako regularni assistant
+#     msg a agent nedostane zadnou vazbu, ze volani bylo spatne.
+_malformed = (
+    '<invoke name="bash" string="cd /tmp/agpx && javap -p -c com/foo.class | grep MIN">'
+)
+_t, _c = parse_tool_calls(_malformed, TOOLS, SPECS)
+if "tool-call format" not in _t.lower() or _c:
+    FAILED.append("malformed invoke → chyba")
+    print(f"❌ malformed invoke: text={_t!r} calls={_c}")
+else:
+    print("✅ malformed invoke vratil chybovou hlasku")
+
 # 23) REGRESE (dukladnejsi): splitter nesmi drzet stream na ZADNE variante
 #     prozy s tagy — jinak se odpoved "zastavi" a nedorazi vubec nic.
 for _i, _p in enumerate(_PROSE_VARIANTS):

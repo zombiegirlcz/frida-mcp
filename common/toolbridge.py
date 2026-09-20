@@ -1044,10 +1044,21 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None,
     cut = _m.start() if _m else len(text)
     visible = text[:cut]
 
-    head_calls = _extract_calls(visible, tool_names, specs)
-    calls = head_calls or _extract_calls(text, tool_names, specs)
+    head_calls, head_errors = _extract_calls(visible, tool_names, specs)
+    _calls, _errors = _extract_calls(text, tool_names, specs)
+    calls = head_calls or _calls
+    errors = list(dict.fromkeys((head_errors or []) + (_errors or [])))
 
-    text = _LEAK.sub("", visible)
+    # malformed invoke bez <parameter> -> vloz chybovou hlasku do textu
+    if errors and not calls:
+        text = _INVOKE.sub("", text)
+        text = re.sub(r"</?invoke\b[^>]*>", "", text, flags=re.I)
+        err = "\n".join(errors)
+        if text.strip():
+            text = text.rstrip() + "\n\n" + err
+        else:
+            text = err
+    text = _LEAK.sub("", text if errors else visible)
     # halucinace "Tool X does not exists." nesmi zustat ve viditelnem textu
     # (model by ji v dalsim tahu uvidel a opakoval)
     text = _TOOL_NOTFOUND.sub("", text)
@@ -1098,9 +1109,13 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None,
 
 
 def _extract_calls(text: str, tool_names: set[str] | None,
-                  specs: dict[str, dict] | None = None) -> list[dict]:
-    """Vytahne vsechna tool volani z textu (vsechny podporovane formaty)."""
+                  specs: dict[str, dict] | None = None) -> tuple[list[dict], list[str]]:
+    """Vytahne vsechna tool volani z textu.
+
+    Returns (calls, errors). errors = hlasky o malformovanych invoke tagy.
+    """
     calls: list[dict] = []
+    errors: list[str] = []
 
     def ok(c: dict | None) -> bool:
         return bool(c) and (tool_names is None or c["name"] in tool_names)
@@ -1113,14 +1128,21 @@ def _extract_calls(text: str, tool_names: set[str] | None,
             # Realny call ma vzdy aspon jeden <parameter; bez teto kontroly se
             # veta premenila na tool call s prazdnymi argumenty a text se urizl.
             if "<parameter" not in body.lower():
+                # Chybu hlasime JEN kdyz je <invoke> na zacatku textu (tool call attempt),
+                # ne kdyz je to proza zminujici tag ("vysvetli <invoke> tag").
+                prefix = text[: m.start()]
+                if not prefix.strip():
+                    errors.append(
+                        f"[CHYBA tool-call format: <invoke name=\"{m.group(1)}\"> "
+                        f"musi obsahovat <parameter> deti, ne string= atribut. Oprav format.]"
+                    )
                 continue
-            c = {"name": m.group(1), "arguments": _parse_params(body)}
-            # i tady musi projit filtrem na znamy nazev nastroje — jinak se
             # za call povazuje i proza zminujici tag a odpoved se "zastavi"
+            c = {"name": m.group(1), "arguments": _parse_params(body)}
             if ok(c):
                 calls.append(c)
         if calls:
-            return calls
+            return calls, errors
 
     # 2) <tool_call>{"name":..,"arguments":..}</tool_call>
     for m in _JSON_BLOCK.finditer(text):
@@ -1132,7 +1154,7 @@ def _extract_calls(text: str, tool_names: set[str] | None,
         if ok(c):
             calls.append(c)
     if calls:
-        return calls
+        return calls, errors
 
     # 3) fenced json {"name":..,"arguments":..}  (nebo holy JSON s argumenty)
     for m in _FENCE.finditer(text):
@@ -1145,7 +1167,7 @@ def _extract_calls(text: str, tool_names: set[str] | None,
         if ok(c):
             calls.append(c)
     if calls:
-        return calls
+        return calls, errors
 
     # 4) BARE JSON bez obalu — DeepSeek to casto posle takhle:
     #    {"name": "read", "arguments": {"path": "..."}}
@@ -1160,7 +1182,7 @@ def _extract_calls(text: str, tool_names: set[str] | None,
         if ok(c):
             calls.append(c)
     if calls:
-        return calls
+        return calls, errors
 
     # 5) ZACHRANA: model rozbije format a posle hodnotu jako HOLY text:
     #    {"name": "bash", "arguments": {"command":
@@ -1171,7 +1193,7 @@ def _extract_calls(text: str, tool_names: set[str] | None,
         raw = m.group(3).strip()
         if raw:
             calls.append({"name": m.group(1), "arguments": {m.group(2): raw}})
-    return [c for c in calls if ok(c)]
+    return [c for c in calls if ok(c)], errors
 
 
 def to_openai_tool_calls(calls: list[dict]) -> list[dict]:
