@@ -170,31 +170,19 @@ def _wants_thinking(body: dict) -> bool:
 
 
 def _clean_thinking(text: str) -> str:
-    """Remove tool-call syntax from thinking text to prevent it from leaking
-    into conversation history and causing hallucinations in subsequent turns."""
-    if not text:
-        return text
-    # Remove DSML/Anthropic-style tags
-    text = re.sub(r'<[｜|]?\s*DSML\s*[｜|]?>', '', text, flags=re.I)
-    # Remove <invoke>, <parameter>, <tool_call>, <calls> tags and their content
-    text = re.sub(r'</?(?:invoke|parameter|tool_calls?|calls|call_call)[^>]*>.*?(?:</(?:invoke|parameter|tool_calls?|calls|call_call)>|$)', '', text, flags=re.S | re.I)
-    # Remove stray closing tags
-    text = re.sub(r'</?(?:invoke|parameter|tool_calls?|calls|call_call)[a-z_]*\s*>', '', text, flags=re.I)
-    # Remove [VYSLEDEK NASTROJE ...] echoes
-    text = re.sub(r'\[VYSLEDEK NASTROJE[^\]]*\]', '', text, flags=re.I)
-    return text
-
-
-def _clean_thinking(text: str) -> str:
-    """Remove tool-call syntax from thinking text to prevent it from leaking
-    into conversation history and causing hallucinations in subsequent turns."""
+    """Remove tool-call syntax from thinking text so it doesn't leak into
+    conversation history and confuse the model in subsequent turns."""
     if not text:
         return text
     from common.toolbridge import _strip_stray_tags
+    # Whole blocks WITH content first (invoke wraps parameter), then stray
+    # tags, DSML markers and result echoes.
+    text = re.sub(r"<invoke \b[^>]*>.*?(?:</invoke>|$)", "", text, flags=re.S | re.I)
+    text = re.sub(r"<parameter \b[^>]*>.*?(?:</parameter>|$)", "", text, flags=re.S | re.I)
+    text = re.sub(r"<tool_calls ?\b[^>]*>.*?(?:</tool_calls ?>|$)", "", text, flags=re.S | re.I)
     text = _strip_stray_tags(text)
-    # Also remove DSML markers and result echoes
-    text = re.sub(r'<[｜|]+\s*DSML\s*[｜|]+[^>]*>', '', text, flags=re.I)
-    text = re.sub(r'\[VYSLEDEK NASTROJE[^\]]*\]', '', text, flags=re.I)
+    text = re.sub(r"<[｜|]+\s*DSML\s*[｜|]+[^>]*>", "", text, flags=re.I)
+    text = re.sub(r"\[VYSLEDEK NASTROJE[^\]]*\]", "", text, flags=re.I)
     return text
 
 
