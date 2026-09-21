@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import json
 import os
 import queue
@@ -127,6 +128,22 @@ def _wants_thinking(body: dict) -> bool:
     if isinstance(eff, str) and eff.lower() not in ("", "none", "off", "disabled"):
         return True
     return False
+
+
+def _clean_thinking(text: str) -> str:
+    """Remove tool-call syntax from thinking text to prevent it from leaking
+    into conversation history and confusing the model in subsequent turns."""
+    if not text:
+        return text
+    # Remove DSML/Anthropic-style tags
+    text = re.sub(r'<[｜|]?\s*DSML\s*[｜|]?>', '', text, flags=re.I)
+    # Remove <invoke>, <parameter>, <tool_calls>, <calls> tags and content
+    text = re.sub(r'</?(?:invoke|parameter|tool_calls?|calls|call_call)[^>]*>.*?(?:</(?:invoke|parameter|tool_calls?|calls|call_call)>|$)', '', text, flags=re.S | re.I)
+    # Remove stray closing tags
+    text = re.sub(r'</?(?:invoke|parameter|tool_calls?|calls|call_call)[a-z_]*\s*>', '', text, flags=re.I)
+    # Remove [VYSLEDEK NASTROJE ...] echoes
+    text = re.sub(r'\[VYSLEDEK NASTROJE[^\]]*\]', '', text, flags=re.I)
+    return text
 
 
 def complete_stream(messages: list[dict], model: str, thinking: bool, tools: list | None):
@@ -358,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
                     kind, piece_in = item
                     if kind == "think":
                         if piece_in:
-                            emit({"reasoning_content": piece_in})
+                            emit({"reasoning_content": _clean_thinking(piece_in)})
                         continue
                     piece = sp.feed(piece_in)
                     if piece:

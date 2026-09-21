@@ -67,8 +67,38 @@ JSON objekt odpovidajici tomu schematu.
 - Muzes poslat i nekolik volani v jedne odpovedi (paralelne).
 - Do bloku nepatri zadny dalsi text ani markdown fence.
 
-"""
+### Pouziti nastroju (PRIKLADY)
 
+```json
+{"name": "bash", "arguments": {"command": "ls -la /tmp"}}
+```
+
+```json
+{"name": "read", "arguments": {"path": "/etc/hostname"}}
+```
+
+```json
+{"name": "write", "arguments": {"path": "/tmp/out.txt", "content": "radek 1\nradek 2"}}
+```
+
+```json
+{"name": "edit", "arguments": {"path": "/tmp/a.txt", "oldText": "starý řádek", "newText": "nový řádek"}}
+```
+
+```json
+{"name": "grep", "arguments": {"pattern": "TODO", "path": "/src", "include": "*.py"}}
+```
+
+Paralelní volání (více tool_call v jedné odpovědi):
+
+```json
+{"name": "bash", "arguments": {"command": "pwd"}}
+```
+```json
+{"name": "bash", "arguments": {"command": "whoami"}}
+```
+
+"""
 # Instrukce na UPLNY KONEC promptu. Model ji vidi jako posledni vec pred
 # odpovedi, takze ma nejvetsi vahu. Resi konkretni selhani: DeepSeek si po
 # tool callu domysli jeho vysledek a cely dalsi tah (viz _ECHO vysvetleni).

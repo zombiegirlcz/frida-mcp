@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import os
 import sys
 import threading
@@ -166,6 +167,35 @@ def _wants_thinking(body: dict) -> bool:
     if isinstance(eff, str) and eff.lower() not in ("", "none", "off", "disabled"):
         return True
     return False
+
+
+def _clean_thinking(text: str) -> str:
+    """Remove tool-call syntax from thinking text to prevent it from leaking
+    into conversation history and causing hallucinations in subsequent turns."""
+    if not text:
+        return text
+    # Remove DSML/Anthropic-style tags
+    text = re.sub(r'<[｜|]?\s*DSML\s*[｜|]?>', '', text, flags=re.I)
+    # Remove <invoke>, <parameter>, <tool_call>, <calls> tags and their content
+    text = re.sub(r'</?(?:invoke|parameter|tool_calls?|calls|call_call)[^>]*>.*?(?:</(?:invoke|parameter|tool_calls?|calls|call_call)>|$)', '', text, flags=re.S | re.I)
+    # Remove stray closing tags
+    text = re.sub(r'</?(?:invoke|parameter|tool_calls?|calls|call_call)[a-z_]*\s*>', '', text, flags=re.I)
+    # Remove [VYSLEDEK NASTROJE ...] echoes
+    text = re.sub(r'\[VYSLEDEK NASTROJE[^\]]*\]', '', text, flags=re.I)
+    return text
+
+
+def _clean_thinking(text: str) -> str:
+    """Remove tool-call syntax from thinking text to prevent it from leaking
+    into conversation history and causing hallucinations in subsequent turns."""
+    if not text:
+        return text
+    from common.toolbridge import _strip_stray_tags
+    text = _strip_stray_tags(text)
+    # Also remove DSML markers and result echoes
+    text = re.sub(r'<[｜|]+\s*DSML\s*[｜|]+[^>]*>', '', text, flags=re.I)
+    text = re.sub(r'\[VYSLEDEK NASTROJE[^\]]*\]', '', text, flags=re.I)
+    return text
 
 
 def complete_stream(body: dict):
@@ -381,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
                 for kind, piece_in in complete_stream(body):
                     if kind == "think":
                         if piece_in:
-                            chunk({"reasoning_content": piece_in})
+                            chunk({"reasoning_content": _clean_thinking(piece_in)})
                         continue
                     piece = _strip_stray_tags(sp.feed(piece_in))
                     if piece:
