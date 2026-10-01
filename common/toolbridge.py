@@ -19,8 +19,20 @@ Reseni:
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
+
+# Kolik tool callu nejvyse prijmeme z JEDNOHO tahu modelu. DeepSeek/Qwen
+# nejsou nativni tool-calling API: model generuje jeden nepreruseny text bez
+# zpetne vazby o vysledku predchoziho volani. Kdyz si (chybne) mysli, ze
+# predchozi volani neproslo, zacne je posilat dokola s drobnymi obminami
+# (jine offsety, jine varianty grepu) a nic ho nezastavi — v realne session
+# (2026-10-01, qwen3.8-max) takhle naskladal 33 volani v JEDNOM tahu, ktere
+# se pak VSECHNY najednou poslaly do pi k provedeni. Realny zamer (par
+# nezavislych volani najednou) tuhle hodnotu nikdy neprekroci; zbytek uz je
+# jen tapani naslepo a je levnejsi ho zahodit, nez ho cele provest.
+MAX_CALLS_PER_TURN = int(os.environ.get("TOOLBRIDGE_MAX_CALLS", "8"))
 
 # ------------------------------------------------------------------ instrukce
 
@@ -465,6 +477,9 @@ class StreamSplitter:
         self.pending = ""
         self.holding = False
         self.emitted: list[str] = []
+        self._total_len = 0
+        # viz _scrub_tool_nf — drzeny mozny zacatek "Tool X does not exist(s)."
+        self._scrub = ""
 
     def _find_all(self, ch: str) -> list[int]:
         """Vsechny pozice znaku `ch` v pendingu (pro hledani markeru)."""
@@ -496,11 +511,60 @@ class StreamSplitter:
             return any(f'"{p}"' in head for p in self._params)
         return False
 
+    # "Tool X does not exist(s)." je znama halucinace (viz _TOOL_NOTFOUND
+    # nize) — model si v delsim kontextu vymysli, ze nastroj neexistuje.
+    # Kdyz ji napise jako BEZNOU PROZU (ne jako soucast pokusu o tool call),
+    # zadny trigger znak (<, {, `) ji nezachyti a tece klientovi primo,
+    # nescrubnuta. Presne to se stalo v realne session (2026-10-01, 20:48):
+    #   "Tool bash does not exists.Tool bash does not exists...## Jakou AI…"
+    # V kazdem pozorovanem pripadu se objevila jako PREAMBULE hned na
+    # zacatku tahu, proto ji hlidame jen v prvnich _TOOL_NF_WINDOW znacich —
+    # hlouběji v dlouhe odpovedi uz se neskenuje (zadna rezie, zadne riziko
+    # zbytecneho drzeni kolem bezneho slova "Tool").
+    _TOOL_NF_WINDOW = 400
+    _TOOL_NF_CAP = 90  # max delka "Tool <jmeno> does not exists." + rezerva
+
+    def _scrub_tool_nf(self, out: str) -> str:
+        """Pozor: `exists?` a `\\.?` v _TOOL_NOTFOUND jsou nepovinne, takze
+        pattern muze "dokoncit" match uz na "...does not exist" (bez "s.").
+        Kdyz Qwen streamuje po slovech/vetsich kusech (realita — API posila
+        token/vetsi delty, ne jednotlive bajty), na to nikdy nedojde a cely
+        vzorec dorazi v jednom kuse. Pri nerealistickem rozdeleni presne na
+        hranici "exist"/"s." muze uniknout 1-2 osirele znaky — znamy, vedomy
+        kompromis (viz tests/test_session_fixes.py, qwen: hallucinace)."""
+        if not out and not self._scrub:
+            return out
+        if not self._scrub and self._total_len > self._TOOL_NF_WINDOW:
+            return out
+        combined = _TOOL_NOTFOUND.sub("", self._scrub + out)
+        idx = combined.find("Tool")
+        if idx != -1:
+            # kompletni "Tool" uz je tu — drz od nej dal (otevrene, dokud
+            # sub() nenajde a nesmaze cely vzorec, nebo to nepretece cap).
+            if len(combined) - idx <= self._TOOL_NF_CAP:
+                out, self._scrub = combined[:idx], combined[idx:]
+            else:
+                out, self._scrub = combined, ""
+            return out
+        # "Tool" jeste neni cele, ale konec textu muze byt jeho ZACATEK
+        # (model muze chodit znak po znaku: "T", "To", "Too"…) — bez tohohle
+        # by se tyto znaky stihly poslat ven driv, nez prijde zbytek a sub()
+        # uz by cely vzorec nenasel.
+        n = min(3, len(combined))
+        while n > 0 and not combined.endswith("Tool"[:n]):
+            n -= 1
+        if n > 0:
+            out, self._scrub = combined[:len(combined) - n], combined[len(combined) - n:]
+        else:
+            out, self._scrub = combined, ""
+        return out
+
     def feed(self, chunk: str) -> str:
         """Vrati text k okamzitemu odeslani (muze byt prazdny)."""
         if not chunk:
             return ""
         self.full.append(chunk)
+        self._total_len += len(chunk)
         if self.holding:
             return ""
         self.pending += chunk
@@ -536,12 +600,14 @@ class StreamSplitter:
         if idx == -1:
             # zadny potencialni marker -> vse hned ven
             out, self.pending = self.pending, ""
+            out = self._scrub_tool_nf(out)
             self.emitted.append(out)
             return out
 
         out, self.pending = self.pending[:idx], self.pending[idx:]
         if self._is_marker(self.pending):
             self.holding = True
+            out = self._scrub_tool_nf(out)
             self.emitted.append(out)
             return out
         # neni to (zatim) marker — drz jen kratky konec, zbytek ven
@@ -549,14 +615,38 @@ class StreamSplitter:
             cut = len(self.pending) - self.HOLD
             out += self.pending[:cut]
             self.pending = self.pending[cut:]
+        out = self._scrub_tool_nf(out)
         self.emitted.append(out)
         return out
+
+    def pending_call_count(self) -> int:
+        """Kolik KOMPLETNICH tool callu uz dorazilo do bufferu behem drzeni.
+
+        Pocita jen striktne UZAVRENE bloky (vybalancovany bare JSON nebo
+        `<invoke name=..><parameter>..</parameter></invoke>`), ne provizorni
+        "zachranu" pro prerusene JSON — ta by tu hlasila "hotovo" uprostred
+        toho, jak model jeste pise cislo. Pouziva ho volajici (shim) k
+        predcasnemu zastaveni spojeni, kdyz model zacne chrlit volani bez
+        konce (viz MAX_CALLS_PER_TURN).
+        """
+        if not self.holding:
+            return 0
+        full = "".join(self.full)
+        n = len(_find_json_objects(full))
+        n += sum(1 for m in _INVOKE.finditer(full) if "<parameter" in m.group(2).lower())
+        return n
 
     def finish(self) -> tuple[str, list[dict]]:
         """Vrati (zbyly_text, tool_calls)."""
         full = "".join(self.full)
         if not self.holding:
-            tail, self.pending = self.pending, ""
+            # self._scrub muze drzet nedokonceny zacatek "Tool X does not
+            # exist(s)." (viz _scrub_tool_nf) — tah uz skoncil, takze bud
+            # se to na konci doplnilo (sub ho smaze), nebo to proste nebyla
+            # ta halucinace (vrati se jako normalni text).
+            tail = _TOOL_NOTFOUND.sub("", self._scrub + self.pending)
+            self._scrub = ""
+            self.pending = ""
             return tail, []
         # Po finish() uz NIC nedrzime — i kdyz se ukaze, ze to call nebyl
         # (napr. proza s <invoke name=... bez <parameter). Drzeni po
@@ -991,6 +1081,69 @@ def _find_json_objects(text: str):
     return out
 
 
+# ZACHRANA pro bare JSON, ktere se NESTIHLO samo uzavrit — qwen3.8-max ho
+# zacne formatem A ({"name":..) a nedokonci ho, misto toho sklouzne do
+# zbytku formatu B (</parameter></invoke>) nebo ho prerusi konec tahu.
+# Realny priklad ze session (2026-10-01):
+#   {"name": "read", "arguments": {"path": "...main.py",
+#   "limit": 50}
+#   </parameter>
+#   </invoke>
+# Chybi 1 uzaviraci "}" (jen "arguments" se uzavrelo, cely objekt ne) ->
+# _find_json_objects nenajde nic (neni vybalancovany), cely tah zmizi beze
+# stopy a model nevi, ze se nic nestalo -> halucinuje dal.
+def _find_truncated_json_objects(text: str):
+    """Jako _find_json_objects, ale dohleda i objekty, kterym chybi N
+    uzaviracich '}' — zastavi se na prvnim neescapovanem '<' mimo retezec
+    (zacatek ciziho tagu) nebo na konci textu, a chybejici zavorky dopocita.
+
+    Vraci (start, end, opraveny_json) jen pro objekty, kterym skutecne
+    neco chybi (depth > 0 pri preruseni) — plne vybalancovane uz resi
+    _find_json_objects.
+    """
+    out = []
+    n = len(text)
+    i = 0
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        start = i
+        depth = 0
+        instr = False
+        esc = False
+        j = i
+        while j < n:
+            ch = text[j]
+            if instr:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    instr = False
+                j += 1
+                continue
+            if ch == '"':
+                instr = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif ch == "<" and depth > 0:
+                break
+            j += 1
+        if depth > 0:
+            chunk = text[start:j].rstrip().rstrip(",")
+            out.append((start, j, chunk + ("}" * depth)))
+            i = j
+        else:
+            i = j + 1
+    return out
+
+
 # znacky, ktere model casto opisuje z promptu do odpovedi
 _LEAK = re.compile(
     r"^\s*(?:\[(?:VYSLEDEK NASTROJE|TOOL RESULT|ASSISTANT|USER|SYSTEM"
@@ -1135,6 +1288,12 @@ def parse_tool_calls(text: str, tool_names: set[str] | None = None,
             "", text, flags=re.I)
         text = _STRAY_TAG.sub("", text)
 
+    # POJISTKA: i kdyz se streamovani neukoncilo vcas (viz
+    # StreamSplitter.pending_call_count / MAX_CALLS_PER_TURN), nikdy
+    # neposilej pi vic volani z jednoho tahu, nez kolik ma smysl provest
+    # najednou — zbytek je uz jen tapani naslepo bez zpetne vazby.
+    calls = calls[:MAX_CALLS_PER_TURN]
+
     return text.strip(), _coerce_types(calls, specs)
 
 
@@ -1208,6 +1367,20 @@ def _extract_calls(text: str, tool_names: set[str] | None,
         c = _coerce(obj)
         if not ok(c):
             # model vynechal nazev nastroje -> dovodime ho z parametru
+            c = _coerce_bare(obj if isinstance(obj, dict) else None, specs)
+        if ok(c):
+            calls.append(c)
+    if calls:
+        return calls, errors
+
+    # 4b) ZACHRANA: bare JSON jako krok 4, ale PRERUSENE drive, nez se samo
+    #     uzavrelo — model zacne formatem A, ale skonci zbytkem formatu B
+    #     (</parameter></invoke>) nebo ho prerusi konec tahu. Chybi 1+
+    #     uzaviraci "}", takze krok 4 (vyzaduje balanc) nic nenajde.
+    for _a, _b, chunk in _find_truncated_json_objects(_escape_inner_quotes(text)):
+        obj = _loads_lenient(chunk)
+        c = _coerce(obj)
+        if not ok(c):
             c = _coerce_bare(obj if isinstance(obj, dict) else None, specs)
         if ok(c):
             calls.append(c)

@@ -198,8 +198,15 @@ class QwenAPI:
         return obj["data"]["id"]
 
     def completion(self, chat_id: str, prompt: str, model: str | None = None,
-                   thinking: bool = False, search: bool = False, timeout: float = 300):
-        """Generator: {'phase': 'think'|'answer'|'', 'text': str}."""
+                   thinking: bool = False, search: bool = False, timeout: float = 300,
+                   stop: object | None = None):
+        """Generator: {'phase': 'think'|'answer'|'', 'text': str}.
+
+        `stop` (threading.Event): kdyz je nastaveny, prestaneme cist dalsi
+        chunky a spojeni zavreme. Qwen neni nativni tool-calling API — bez
+        tohoto by model po detekci tool callu klidne pokracoval dal
+        (viz qwen_shim.py: MAX_CALLS_PER_TURN).
+        """
         m = model or self.model
         ts = int(time.time())
         body = {
@@ -223,22 +230,31 @@ class QwenAPI:
             "timestamp": ts, "share_id": "", "origin_branch_message_id": "",
         }
         resp = self._request("POST", f"/api/v2/chat/completions?chat_id={chat_id}", body, timeout)
-        for raw in resp:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
-                continue
-            payload = line[5:].strip()
-            if not payload or payload == "[DONE]":
-                continue
-            try:
-                obj = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
-            for ch in obj.get("choices") or []:
-                d = ch.get("delta") or {}
-                txt = d.get("content") or ""
-                if txt:
-                    yield {"phase": d.get("phase") or "", "text": txt}
+        try:
+            for raw in resp:
+                if stop is not None and stop.is_set():
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    obj = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                for ch in obj.get("choices") or []:
+                    d = ch.get("delta") or {}
+                    txt = d.get("content") or ""
+                    if txt:
+                        yield {"phase": d.get("phase") or "", "text": txt}
+        finally:
+            if hasattr(resp, "close"):
+                try:
+                    resp.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def ask(self, prompt: str, model: str | None = None, thinking: bool = False) -> str:
         """Jeden dotaz do noveho chatu -> text odpovedi."""

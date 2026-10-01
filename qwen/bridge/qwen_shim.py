@@ -35,8 +35,8 @@ from bridge.qwen_api import (DEFAULT_MODEL, TOKEN_CACHE, QwenAPI,
                             QwenError)
 from common.convcache import ConvCache
 from common.netfix import install_dns_cache
-from common.toolbridge import (StreamSplitter, build_prompt, cap_messages,
-                               parse_tool_calls, tool_specs,
+from common.toolbridge import (MAX_CALLS_PER_TURN, StreamSplitter, build_prompt,
+                               cap_messages, parse_tool_calls, tool_specs,
                                to_openai_tool_calls, tool_names)
 
 # Overeno proti zivemu API (appka jich nabizi vic, ale API zna tyto):
@@ -147,7 +147,8 @@ def _clean_thinking(text: str) -> str:
     return text
 
 
-def complete_stream(messages: list[dict], model: str, thinking: bool, tools: list | None):
+def complete_stream(messages: list[dict], model: str, thinking: bool, tools: list | None,
+                    stop: threading.Event | None = None):
     """Generator textovych chunku (zivi stream z Qwenu, nic se nebufferuje).
 
     POZOR: Qwen API bere jen JEDNU zpravu ("Invalid input too many messages")
@@ -155,6 +156,12 @@ def complete_stream(messages: list[dict], model: str, thinking: bool, tools: lis
     jeden prompt. Co ale delame: **reuse chat_id** — jeden chat na konverzaci
     misto noveho chatu pro kazdou zpravu (to je napadne a je to presne to,
     podle ceho se da automatizace poznat).
+
+    `stop`: kdyz volajici (Handler) usoudi, ze uz ma dost tool callu (viz
+    MAX_CALLS_PER_TURN), nastavi tuto udalost — dalsi chunky od Qwenu se
+    zahodi a spojeni se zavre, misto aby model dal chrlil dalsi (duplicitni)
+    volani bez zpetne vazby (viz session.jsonl 2026-10-01: 33 volani v
+    jednom tahu).
     """
     api = get_api()
     messages, trimmed = _cap_messages(messages)
@@ -169,7 +176,7 @@ def complete_stream(messages: list[dict], model: str, thinking: bool, tools: lis
 
     def _run(sid, text_prompt):
         """Preklad faze Qwenu na (kind, text); mysleni jde jako 'think'."""
-        for ch in api.completion(sid, text_prompt, model=model, thinking=thinking):
+        for ch in api.completion(sid, text_prompt, model=model, thinking=thinking, stop=stop):
             txt = ch.get("text") or ""
             if not txt:
                 continue
@@ -182,19 +189,26 @@ def complete_stream(messages: list[dict], model: str, thinking: bool, tools: lis
         for kind, txt in _run(session_id, prompt):
             got = True
             yield kind, txt
+            if stop is not None and stop.is_set():
+                break
     except Exception as e:  # noqa: BLE001
         # chat uz nemusi existovat / vyprsel / timeout -> zaloz novy a zkus
         # znovu, ale s KRATSim kontextem. Opakovat plny megaprompt nema smysl:
         # kdyz vyprsel jednou, vyprsi znovu (a pi zbytecne ceka dalsi minuty).
-        print(f"[qwen-shim] stream selhal ({e}) -> novy chat (kratsi kontext)",
-              file=sys.stderr)
-        _convs.drop(session_id)
-        session_id = api.new_chat()
-        retry_msgs, _ = _cap_messages(messages, RETRY_PROMPT_CHARS)
-        retry_prompt = build_prompt(retry_msgs, tools)
-        for kind, txt in _run(session_id, retry_prompt):
-            got = True
-            yield kind, txt
+        if stop is not None and stop.is_set():
+            pass  # zavreno zamerne (MAX_CALLS_PER_TURN), ne chyba -> nezkouset znovu
+        else:
+            print(f"[qwen-shim] stream selhal ({e}) -> novy chat (kratsi kontext)",
+                  file=sys.stderr)
+            _convs.drop(session_id)
+            session_id = api.new_chat()
+            retry_msgs, _ = _cap_messages(messages, RETRY_PROMPT_CHARS)
+            retry_prompt = build_prompt(retry_msgs, tools)
+            for kind, txt in _run(session_id, retry_prompt):
+                got = True
+                yield kind, txt
+                if stop is not None and stop.is_set():
+                    break
     if got:
         _convs.bind(messages, session_id)
 
@@ -344,10 +358,18 @@ class Handler(BaseHTTPRequestHandler):
             # by jinak spojeni ukoncilo ("Stream ended without finish_reason").
             q: "queue.Queue" = queue.Queue()
             _SENTINEL = object()
+            # Qwen neni nativni tool-calling API: dokud sam neskonci, nic ho
+            # nezastavi, i kdyz uz davno poslal pouzitelne volani. Kdyz si
+            # (chybne) mysli, ze predchozi volani neproslo, posila je dokola
+            # s drobnymi obminami — v realne session 33 volani v JEDNOM tahu
+            # (2026-10-01). stop_event prerusi upstream spojeni, jakmile
+            # bufferu dojde pres MAX_CALLS_PER_TURN uzavrenych volani.
+            stop_event = threading.Event()
 
             def _pump() -> None:
                 try:
-                    for item in complete_stream(messages, model, thinking, tools):
+                    for item in complete_stream(messages, model, thinking, tools,
+                                               stop=stop_event):
                         q.put(item)
                 except BaseException as e:  # noqa: BLE001
                     q.put(e)
@@ -381,6 +403,12 @@ class Handler(BaseHTTPRequestHandler):
                     piece = sp.feed(piece_in)
                     if piece:
                         emit({"content": piece})
+                    if sp.pending_call_count() >= MAX_CALLS_PER_TURN:
+                        print(f"[qwen-shim] {sp.pending_call_count()} tool callu v jednom "
+                              f"tahu >= MAX_CALLS_PER_TURN ({MAX_CALLS_PER_TURN}) -> "
+                              f"zavirem stream, zbytek zahozen", file=sys.stderr)
+                        stop_event.set()
+                        break
 
                 if not client_gone:
                     tail, calls = sp.finish()

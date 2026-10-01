@@ -104,7 +104,7 @@ def test_client_disconnect_does_not_kill_handler():
     """
     errors: list[BaseException] = []
 
-    def fake_stream(messages, model, thinking, tools):
+    def fake_stream(messages, model, thinking, tools, stop=None):
         # posle prvni chunk, pak pocka, aby klient stihl odpojit
         yield "answer", "prvni "
         time.sleep(0.4)
@@ -164,7 +164,7 @@ def test_heartbeat_ping_when_upstream_silent():
     old_hb = qwen_shim.HEARTBEAT_S
     qwen_shim.HEARTBEAT_S = 0.3  # aby test necekal 10 s
 
-    def slow_stream(messages, model, thinking, tools):
+    def slow_stream(messages, model, thinking, tools, stop=None):
         time.sleep(1.0)          # Qwen "premysli" — zadny token
         yield "answer", "hotovo"
 
@@ -224,7 +224,7 @@ def test_retry_really_happens_with_shorter_prompt():
         def new_chat(self):
             return "fake-chat-id"
 
-        def completion(self, sid, prompt, model=None, thinking=False):
+        def completion(self, sid, prompt, model=None, thinking=False, stop=None):
             captured.append(prompt)
             if len(captured) == 1:
                 raise RuntimeError("The read operation timed out")

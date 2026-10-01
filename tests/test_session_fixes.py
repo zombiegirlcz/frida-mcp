@@ -572,6 +572,189 @@ def test_shrink_args_fallbacks():
           json.loads(_shrink_args(mixed, 10_000)) == json.loads(mixed))
 
 
+# ------------------------- 9) qwen3.8-max: bare JSON prerusene zbytkem formatu B
+# V session.jsonl (2026-10-01, konec): qwen zacal tool call formatem A
+# ({"name":...), ale skoncil zbytkem formatu B misto uzaviraci ")":
+#   {"name": "read", "arguments": {"path": "...main.py",
+#   "limit": 50}
+#   </parameter>
+#   </invoke>
+# Chybela 1 uzaviraci "}" (jen "arguments" se uzavrelo, cely objekt ne).
+# _find_json_objects vyzaduje balanc -> nenasel nic, cely tah zmizel beze
+# stopy (zadny call, zadna chyba) a model nevedel, ze se nic nestalo ->
+# dal hlasil "Tool bash does not exists.".
+
+def test_qwen_truncated_bare_json_recovered():
+    raw = (
+        '<tool_call>\n'
+        '{"name": "read", "arguments": '
+        '{"path": "/root/statistiky/.agents/skills/match-probability/scripts/main.py",\n'
+        '"limit": 50}\n'
+        '</parameter>\n'
+        '</invoke>\n'
+        '</tool_call>'
+    )
+    text, calls = parse_tool_calls(raw, TOOLS, SPECS)
+    check("61. qwen: prerusene bare JSON (chybi '}') se dopocita",
+          bool(calls) and calls[0]["name"] == "read", f"calls={calls}")
+    check("62. qwen: argumenty jsou spravne (path + limit)",
+          calls and calls[0]["arguments"] == {
+              "path": "/root/statistiky/.agents/skills/match-probability/scripts/main.py",
+              "limit": 50}, f"arguments={calls[0]['arguments'] if calls else None!r}")
+    check("63. qwen: zbytek formatu B (</parameter></invoke>) nezustane v textu",
+          "</parameter>" not in text and "</invoke>" not in text, repr(text))
+
+
+def test_qwen_truncated_bare_json_end_of_text():
+    """Stejna diera, ale model skonci tah uplne (bez zbytku formatu B)."""
+    raw = '{"name": "bash", "arguments": {"command": "echo ahoj"'
+    _text, calls = parse_tool_calls(raw, TOOLS, SPECS)
+    check("64. qwen: prerusene na konci tahu (bez tagu) se taky dopocita",
+          bool(calls) and calls[0] == {"name": "bash",
+                                       "arguments": {"command": "echo ahoj"}},
+          f"calls={calls}")
+
+
+# ----------------------- 10) qwen: 33 tool callu v jednom tahu (fronta/stream)
+# V session.jsonl (2026-10-01, ~20:30): qwen poslal v JEDNOM tahu 33 tool
+# callu (read/bash), hodne z nich prekryvajici se varianty tehoz dotazu
+# (stejny soubor na ruznych offsetech, podobne grepy) — model nedostal
+# zpetnou vazbu k drivejsim volanim (Qwen neni nativni tool-calling API,
+# shim cte cely stream az do konce), takze misto cekani na vysledek proste
+# "zkousel dal". Vsech 33 se pak najednou poslalo do pi k provedeni.
+#
+# Oprava: StreamSplitter.pending_call_count() umoznuje shimu zavrit upstream
+# spojeni, jakmile pocet UZAVRENYCH volani v bufferu dosahne
+# MAX_CALLS_PER_TURN; parse_tool_calls() navic jako pojistku orizne
+# vysledny seznam na stejnou hodnotu, i kdyz se stream nestihl zavrit vcas.
+
+def _bare_call_block(i: int) -> str:
+    return ('<tool_call>\n{"name": "bash", "arguments": '
+            f'{{"command": "echo {i}"}}}}\n</tool_call>\n')
+
+
+def test_stream_splitter_counts_complete_calls():
+    from common.toolbridge import StreamSplitter  # noqa: PLC0415
+
+    sp = StreamSplitter({"bash"}, SPECS)
+    sp.feed(_bare_call_block(1))
+    check("65. qwen: 1. uzavrene volani se spocita",
+          sp.pending_call_count() == 1, f"count={sp.pending_call_count()}")
+    sp.feed(_bare_call_block(2))
+    sp.feed(_bare_call_block(3))
+    check("66. qwen: dalsi uzavrena volani se pricitaji",
+          sp.pending_call_count() == 3, f"count={sp.pending_call_count()}")
+
+
+def test_stream_splitter_ignores_incomplete_tail():
+    """Rozepsane (jeste neuzavrene) volani se NESMI pocitat jako hotove —
+    jinak by shim zavrel spojeni uprostred toho, jak model teprve pise."""
+    from common.toolbridge import StreamSplitter  # noqa: PLC0415
+
+    sp = StreamSplitter({"bash"}, SPECS)
+    sp.feed(_bare_call_block(1))
+    sp.feed('<tool_call>\n{"name": "bash", "arguments": {"command": "echo rozepsane')
+    check("67. qwen: rozepsane volani na konci se NEpocita",
+          sp.pending_call_count() == 1, f"count={sp.pending_call_count()}")
+
+
+def test_parse_tool_calls_caps_runaway_flood():
+    """I bez streamovaneho zastaveni: 33 volani v jednom textu se orizne na
+    MAX_CALLS_PER_TURN — pojistka pro non-streaming `complete()` i pro
+    pripad, ze se stream nestihl zavrit vcas."""
+    from common.toolbridge import MAX_CALLS_PER_TURN  # noqa: PLC0415
+
+    raw = "".join(_bare_call_block(i) for i in range(33))
+    _text, calls = parse_tool_calls(raw, TOOLS, SPECS)
+    check("68. qwen: 33 volani v jednom tahu se orizne na MAX_CALLS_PER_TURN",
+          len(calls) == MAX_CALLS_PER_TURN, f"len(calls)={len(calls)}")
+    check("69. qwen: oriznute volani jsou PRVNICH N (poradi zachovano)",
+          [c["arguments"]["command"] for c in calls] ==
+          [f"echo {i}" for i in range(MAX_CALLS_PER_TURN)],
+          f"calls={[c['arguments'] for c in calls]}")
+
+
+def test_parse_tool_calls_small_batch_untouched():
+    """Bezny mensi pocet paralelnich volani (ten skill vyslovne doporucuje)
+    se oriznout NESMI."""
+    from common.toolbridge import MAX_CALLS_PER_TURN  # noqa: PLC0415
+
+    n = min(3, MAX_CALLS_PER_TURN - 1)
+    raw = "".join(_bare_call_block(i) for i in range(n))
+    _text, calls = parse_tool_calls(raw, TOOLS, SPECS)
+    check("70. qwen: mala davka paralelnich volani zustava cela",
+          len(calls) == n, f"len(calls)={len(calls)} ocekavano={n}")
+
+
+# ------------------------- 11) qwen: halucinace unikla DO STREAMU jako proza
+# V session.jsonl (2026-10-01, 20:48, novy pokus po kompakci): stejny dotaz
+# jako predtim, ale tentokrat qwen NEZKOUSEL zadny tool call — proste napsal
+# do bezneho textu "Tool bash does not exists." 5x za sebou jako preambuli
+# pred skutecnou odpovedi:
+#   "Tool bash does not exists.Tool bash does not exists.Tool bash does not
+#    exists.Tool read does not exists.Tool write does not exists.## Jakou AI…"
+# _TOOL_NOTFOUND uz tuhle halucinaci umel vycistit UVNITR parse_tool_calls(),
+# ale to se vola jen z StreamSplitter.finish() — a do nej se dojde jen tehdy,
+# kdyz text nekdy zacal vypadat jako SKUTECNY pokus o tool call (holding).
+# Bezna proza bez < { ` triggeru se posle VEN HNED, finish()/parse_tool_calls
+# se na ni vubec nedostanou a halucinace unikne nescrubnuta primo klientovi
+# (a zpet do historie, kde se podle dosavadnich komentaru v kodu jen
+# zesiluje). Oprava: StreamSplitter._scrub_tool_nf() hlida tenhle vzorec
+# nezavisle na marker/holding logice, primo v bezne streamovanem textu.
+
+def test_stream_splitter_scrubs_prose_hallucination_whole_chunk():
+    """Cely text dorazi v JEDNOM kuse (realisticke SSE API chovani)."""
+    from common.toolbridge import StreamSplitter  # noqa: PLC0415
+
+    text = ("Podivam se nejdriv.\n\n"
+            "Tool bash does not exists.Tool bash does not exists."
+            "Tool read does not exists.Tool write does not exists."
+            "## Jakou AI pouziva agent?")
+    sp = StreamSplitter(TOOLS, SPECS)
+    out = sp.feed(text)
+    tail, calls = sp.finish()
+    result = out + tail
+    check("71. qwen: halucinujici proza bez tool callu se vycisti (1 kus)",
+          "does not exist" not in result.lower(), repr(result))
+    check("72. qwen: skutecny obsah za halucinaci zustava cely",
+          result.endswith("## Jakou AI pouziva agent?"), repr(result))
+    check("73. qwen: zadny tool call se nevymysli (zadny byl zamyslen)",
+          calls == [], f"calls={calls}")
+
+
+def test_stream_splitter_scrubs_prose_hallucination_word_chunks():
+    """Realisticka granularita: API posila po slovech/vetsich kusech, ne po
+    jednotlivych bajtech (viz docstring _scrub_tool_nf)."""
+    import re as _re  # noqa: PLC0415
+    from common.toolbridge import StreamSplitter  # noqa: PLC0415
+
+    text = ("Podivam se nejdriv.\n\n"
+            "Tool bash does not exists.Tool bash does not exists."
+            "Tool read does not exists."
+            "## Jakou AI pouziva agent?\n\nZadnou AI nepouziva.")
+    sp = StreamSplitter(TOOLS, SPECS)
+    out = "".join(sp.feed(c) for c in _re.findall(r"\S+\s*|\s+", text))
+    tail, _calls = sp.finish()
+    result = out + tail
+    check("74. qwen: halucinace se vycisti i po slovnich kusech streamu",
+          result == ("Podivam se nejdriv.\n\n"
+                     "## Jakou AI pouziva agent?\n\nZadnou AI nepouziva."),
+          repr(result))
+
+
+def test_stream_splitter_does_not_eat_legitimate_tool_word():
+    """Bezne pouziti slova 'Tool' v proze se nesmi ztratit — jen smi dorazit
+    s malym zpozdenim (cap), nikdy ne zmizet."""
+    from common.toolbridge import StreamSplitter  # noqa: PLC0415
+
+    text = "Tool volani v tomhle projektu resi common/toolbridge.py."
+    sp = StreamSplitter(TOOLS, SPECS)
+    out = sp.feed(text)
+    tail, _calls = sp.finish()
+    check("75. qwen: bezna veta se slovem 'Tool' se NEZTRATI",
+          out + tail == text, repr(out + tail))
+
+
 def main() -> int:
     test_dns_cache()
     test_dns_cache_survives_and_persists()
@@ -595,6 +778,15 @@ def main() -> int:
     test_shrink_size_matches_text_content()
     test_shrink_args_keeps_valid_json()
     test_shrink_args_fallbacks()
+    test_qwen_truncated_bare_json_recovered()
+    test_qwen_truncated_bare_json_end_of_text()
+    test_stream_splitter_counts_complete_calls()
+    test_stream_splitter_ignores_incomplete_tail()
+    test_parse_tool_calls_caps_runaway_flood()
+    test_parse_tool_calls_small_batch_untouched()
+    test_stream_splitter_scrubs_prose_hallucination_whole_chunk()
+    test_stream_splitter_scrubs_prose_hallucination_word_chunks()
+    test_stream_splitter_does_not_eat_legitimate_tool_word()
     print()
     if FAILED:
         print(f"SELHALO: {len(FAILED)} — " + ", ".join(FAILED))
