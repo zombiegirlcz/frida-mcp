@@ -62,15 +62,21 @@ def fingerprint(messages: list[dict]) -> str:
 
 
 class Entry:
-    __slots__ = ("key", "n", "fp", "session_id", "parent_id", "at")
+    __slots__ = ("key", "n", "fp", "session_id", "parent_id", "at", "last_output")
 
-    def __init__(self, key: str, n: int, fp: str, session_id: str, parent_id=None):
+    def __init__(self, key: str, n: int, fp: str, session_id: str, parent_id=None,
+                 last_output=None):
         self.key = key
         self.n = n
         self.fp = fp
         self.session_id = session_id
         self.parent_id = parent_id
         self.at = time.time()
+        # Raw (kind, text) chunky z posledni USPESNE dokoncene odpovedi pro
+        # tento presny stav historie. Pouziva se jen pro exact-retry replay
+        # (viz lookup()) — NEPERZISTUJE se na disk (jen in-memory cache pro
+        # zivot tohoto procesu shimu).
+        self.last_output = last_output
 
 
 class ConvCache:
