@@ -195,14 +195,26 @@ def complete_stream(body: dict):
     Pri auth chybe (DeepSeekError.retry) -> zkusime refresh token + 1 retry.
     """
     def _try_stream(api, session_id, prompt, parent_id, thinking, temp):
-        """Zkus stream, pri DeepSeekError.retry -> refresh token + retry jednou."""
+        """Zkus stream, pri DeepSeekError.retry -> refresh token + retry jednou.
+
+        Vystup se zaroven cachuje do convcache (last_output) — kdyz pi
+        pozdeji posle PRESNE stejnou historii znovu (napr. nedostalo
+        potvrzeni teto odpovedi a retryuje), prehraje se cache misto
+        noveho API volani (viz ConvCache.lookup — bez tohohle by se cela
+        historie poslala znovu jako prompt do uz existujiciho chatu a
+        DeepSeek by videl duplikovane tool cally/vysledky).
+        """
         for attempt in range(2):
+            out: list[tuple[str, str]] = []
             try:
-                yield from api.completion_stream(session_id, prompt,
-                                                 parent_message_id=parent_id,
-                                                 thinking_enabled=thinking,
-                                                 temperature=temp)
-                _convs.bind(messages, session_id, api.last_response_message_id)
+                for kind, text in api.completion_stream(session_id, prompt,
+                                                         parent_message_id=parent_id,
+                                                         thinking_enabled=thinking,
+                                                         temperature=temp):
+                    out.append((kind, text))
+                    yield kind, text
+                _convs.bind(messages, session_id, api.last_response_message_id,
+                           last_output=out)
                 return
             except DeepSeekError as e:
                 if not e.retry or attempt == 1:
@@ -237,6 +249,24 @@ def complete_stream(body: dict):
     # prefix zprav), takze kratime az po nem — jinak by se konverzace
     # nedohledala a prisli bychom o navazani chatu.
     session_id, parent_id, delta = _convs.lookup(messages)
+    if session_id and delta is None:
+        # presny retry stejneho stavu (viz ConvCache.lookup) — DeepSeek uz
+        # tyto zpravy MA v historii chatu, takze se NESMI poslat znovu jako
+        # novy prompt (duplikace). Prehrajeme cachovanou odpoved beze
+        # dalsiho API volani.
+        cached = _convs.cached_output(session_id)
+        if cached is not None:
+            print(f"[shim] presny retry v chatu {session_id[:8]}… "
+                  f"-> prehravam cachovanou odpoved ({len(cached)} chunku)",
+                  file=sys.stderr)
+            yield from cached
+            return
+        # cache neni k dispozici (napr. restart shimu mezitim last_output
+        # ztratil) -> nelze bezpecne prehrat, zahod a zacni novy chat
+        print(f"[shim] presny retry v chatu {session_id[:8]}… "
+              f"ale cache je prazdna (restart?) -> novy chat", file=sys.stderr)
+        _convs.drop(session_id)
+        session_id = None
     if session_id:
         # i delta muze byt obrovska (velky vysledek nastroje)
         delta, dtrim = cap_messages(delta, MAX_PROMPT_CHARS // 2)

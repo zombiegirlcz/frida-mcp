@@ -57,10 +57,24 @@ check("2. request = stejny chat + delta",
       sid == "chat-A" and parent == 2 and [m["role"] for m in delta] == ["assistant", "tool"],
       f"sid={sid} parent={parent} delta={[m['role'] for m in delta]}")
 
-# 3) retry se stejnymi zpravami -> posli vse znovu (ale stejny chat)
+# 3) retry se stejnymi zpravami -> NESMI posilat celou historii znovu
+#    (DeepSeek uz tyto zpravy MA — druhy prompt by byl duplikat a model by
+#    videl stejne tool cally/vysledky 2x, viz session.jsonl). delta=None je
+#    signal pro volajici "prehraj cached_output(), nevolej API znovu".
 sid, parent, delta = c.lookup([SYS, A1])
-check("3. retry = stejny chat, cela historie",
-      sid == "chat-A" and len(delta) == 2, f"sid={sid} delta={len(delta)}")
+check("3. retry = stejny chat, BEZ re-poslani historie (delta=None)",
+      sid == "chat-A" and delta is None, f"sid={sid} delta={delta}")
+
+# 3b) bind() s last_output ulozi cache pro presny retry
+c.bind([SYS, A1], "chat-A", 2, last_output=[("answer", "Mam 3 .py soubory.")])
+sid, parent, delta = c.lookup([SYS, A1])
+check("3b. po bind(last_output=...) je retry stale delta=None",
+      sid == "chat-A" and delta is None, f"sid={sid} delta={delta}")
+check("3c. cached_output() vrati presne to, co bylo nabindovano",
+      c.cached_output("chat-A") == [("answer", "Mam 3 .py soubory.")],
+      f"cached={c.cached_output('chat-A')}")
+check("3d. cached_output() pro neznamou session vrati None",
+      c.cached_output("chat-neexistuje") is None)
 
 # 4) jina konverzace se NESMI splest
 B = [SYS, {"role": "user", "content": "Uplne jina otazka"}]

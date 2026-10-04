@@ -156,6 +156,18 @@ class ConvCache:
 
         Bud navaze existujici chat (a vrati jen delta), nebo vrati
         (None, None, vsechny zpravy) = zacni novy chat.
+
+        Specialni pripad: `delta is None` znamena "presny retry" — `messages`
+        je BIT PO BITU stejne, jako pri poslednim uspesnem `bind()`. Tohle NENI
+        novy tah (napr. pi nedostalo potvrzeni odpovedi a posila stejny
+        pozadavek znovu) — server (DeepSeek) uz tyto zpravy MA v historii
+        chatu. Puvodne se v tomhle pripade poslala cela historie znovu jako
+        novy prompt do stejneho chatu -> server dostal duplikovany obsah
+        (stejne tool cally/vysledky dvakrat za sebou) a model se z toho pletl
+        (myslel si, ze ma znovu editovat soubor, ktery uz jednou edtioval,
+        videl stary Read vysledek znovu, atd. — presne tohle zpusobilo
+        "nastroje se posilaji 2x" v logu). Volajici MUSI pri `None` prehrat
+        `cached_output(session_id)` misto noveho API volani.
         """
         with self._lock:
             self._gc_locked()
@@ -166,8 +178,8 @@ class ConvCache:
                 e = self._entries.get(self._current)
                 if e is not None:
                     if e.n == n_all and fingerprint(messages) == e.fp:
-                        # retry stejneho stavu -> posli celou historii do stejneho chatu
-                        return e.session_id, e.parent_id, messages
+                        e.at = time.time()
+                        return e.session_id, e.parent_id, None
                     if (n_all > e.n
                             and fingerprint(messages[: e.n]) == e.fp):
                         e.at = time.time()
@@ -182,18 +194,35 @@ class ConvCache:
                 if fingerprint(messages[: e.n]) == e.fp:
                     e.at = time.time()
                     if e.n == n_all:
-                        return e.session_id, e.parent_id, messages
+                        return e.session_id, e.parent_id, None
                     return e.session_id, e.parent_id, messages[e.n :]
             return None, None, messages
 
-    def bind(self, messages: list[dict], session_id: str, parent_id=None) -> None:
-        """Zapise, ze konverzace ma danou session a je u zpravy len(messages)."""
+    def cached_output(self, session_id: str):
+        """Posledni (kind, text) vystup svazany s danou session (pro exact-retry).
+
+        `None`, kdyz neni k dispozici (napr. restart shimu — last_output se
+        neperzistuje) — volajici v tom pripade musi `drop()` a zacit novy chat.
+        """
+        with self._lock:
+            for e in self._entries.values():
+                if e.session_id == session_id:
+                    return e.last_output
+            return None
+
+    def bind(self, messages: list[dict], session_id: str, parent_id=None,
+             last_output=None) -> None:
+        """Zapise, ze konverzace ma danou session a je u zpravy len(messages).
+
+        `last_output` (volitelne): raw (kind, text) chunky odpovedi, co ji
+        tenhle tah vyprodukoval — cachuje se pro exact-retry (viz lookup()).
+        """
         with self._lock:
             key = self._current or f"fp:{fingerprint(messages)[:16]}"
             self._entries = {k: e for k, e in self._entries.items()
                              if e.session_id != session_id}
             self._entries[key] = Entry(key, len(messages), fingerprint(messages),
-                                       session_id, parent_id)
+                                       session_id, parent_id, last_output)
             self._gc_locked()
             self._save()
 
