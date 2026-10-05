@@ -798,8 +798,13 @@ def _coerce_bare(obj, specs: dict[str, dict] | None) -> dict | None:
 # klice, pod kterymi muze byt obsah jeste jednou zabaleny
 _WRAPPED_ARG_KEYS = ("arguments", "args", "parameters", "input", "kwargs")
 
+# klice, pod kterymi muze byt nazev nastroje (kdyz model posle CELY tool call
+# jeste jednou jako hodnotu `arguments`)
+_CALL_NAME_KEYS = ("name", "tool", "tool_name")
 
-def _unwrap_args(args: dict, depth: int = 0) -> dict:
+
+def _unwrap_args(args: dict, depth: int = 0,
+                 expected_name: str | None = None) -> dict:
     """Rozbali ARGUMENTY ZABALENE JESTE JEDNOU.
 
     DeepSeek to posila dost casto, v realne session to shodilo tool call:
@@ -809,16 +814,37 @@ def _unwrap_args(args: dict, depth: int = 0) -> dict:
         Validation failed for tool "bash":
           - command: must have required properties command
 
-    Rozbalujeme JEN kdyz je v objektu presne jeden klic z `_WRAPPED_ARG_KEYS`
-    (jinak by to rozbilo nastroj, ktery ma parametr opravdu nazvany
-    `arguments`). Max 3 urovne, aby se to nezacyklilo.
+    Jsou DVE varianty zabaleni:
+      (1) args = {"arguments": ...}                  — jeden klic z _WRAPPED_ARG_KEYS
+      (2) args = {"name":"bash","arguments": ...}   — model posle CELY tool call
+          znovu jako hodnotu `arguments`. Tohle je prave ten realny pripad ze
+          session (2026-10-04): args mela navic klic `name`, takze stara
+          podminka `len(args) != 1` unwrap VUBEC nespustila a pi hlasil
+          'must have required properties command'.
+    Variantu (2) rozbalujeme JEN kdyz se jmeno znovu-zabaleneho callu shoduje
+    s vnejsim jmenem nastroje (`expected_name`) — jinak by to rozbilo nastroj,
+    ktery ma parametr opravdu nazvany `name`/`arguments`. Max 3 urovne.
     """
-    if depth >= 3 or len(args) != 1:
+    if depth >= 3:
         return args
-    k = next(iter(args))
-    if k not in _WRAPPED_ARG_KEYS:
+    if len(args) == 1:
+        k = next(iter(args))
+        if k not in _WRAPPED_ARG_KEYS:
+            return args
+        v = args[k]
+    elif len(args) == 2:
+        # {"name": X, "arguments": Y} — cely tool call znovu zabaleny
+        name_k = next((k for k in _CALL_NAME_KEYS if k in args), None)
+        wrap_k = next((k for k in _WRAPPED_ARG_KEYS if k in args), None)
+        if not name_k or not wrap_k:
+            return args
+        # unwrap jen kdyz jmeno sedi s vnejsim (jinak je to realny parametr
+        # nejakeho nastroje, ktery ma `name` i `arguments`)
+        if not expected_name or str(args[name_k]) != expected_name:
+            return args
+        v = args[wrap_k]
+    else:
         return args
-    v = args[k]
     if isinstance(v, str):
         if not v.strip():
             v = {}
@@ -857,7 +883,7 @@ def _coerce(obj) -> dict | None:
             args = {"_raw": args}
     if not isinstance(args, dict):
         args = {}
-    args = _unwrap_args(args)
+    args = _unwrap_args(args, expected_name=str(name))
     return {"name": str(name), "arguments": args}
 
 
