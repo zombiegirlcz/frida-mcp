@@ -144,6 +144,71 @@ c5.set_current("pi-session-BBB")
 sid, _, delta = c5.lookup([SYS, A1, A2, A3])
 check("13. jina pi session = vlastni chat", sid is None, f"sid={sid}")
 
+# ------------------------------------------- race: request driv nez /session
+# V praxi (2026-11-03): pi poslalo prvni chat/completions driv, nez extension
+# stihla POST /session. bind() nemel _current -> ulozil entry pod "fp:…".
+# Kdyz pak /session dorazil, set_current() jen nastavil _current a osirelou
+# entry nechal pod fp: klicem -> lookup() ji nenasel -> NOVY chat.
+# Z jedne konverzace tak byly 4 chaty v appce.
+c6 = ConvCache(state_path=os.path.join(tempfile.mkdtemp(), "s6.json"))
+sid, _, delta = c6.lookup([SYS, A1])
+check("14. bez /session je to novy chat (no-session-id)",
+      sid is None and c6.last_new_reason == "no-session-id",
+      f"sid={sid} reason={c6.last_new_reason}")
+c6.bind([SYS, A1], "chat-ORPHAN", 3)
+check("15. entry se ulozila pod fp: (osirela)",
+      any(k.startswith("fp:") for k in c6._entries),
+      f"klice={list(c6._entries)}")
+
+c6.set_current("pi-session-CCC")
+check("16. set_current adoptoval osirelou fp: entry",
+      "pi-session-CCC" in c6._entries
+      and not any(k.startswith("fp:") for k in c6._entries),
+      f"klice={list(c6._entries)}")
+sid, parent, delta = c6.lookup([SYS, A1, A2, A3])
+check("17. adoptovana entry -> STEJNY chat, ne novy",
+      sid == "chat-ORPHAN" and parent == 3 and len(delta) == 2,
+      f"sid={sid} parent={parent} delta={len(delta)}")
+
+# 18) fresh (compact) i po adopci zalozi novy chat a rekne duvod
+c6.set_current("pi-session-CCC", fresh=True)
+sid, _, _ = c6.lookup([SYS, A1, A2, A3])
+check("18. compact/fresh -> novy chat s duvodem 'fresh'",
+      sid is None and c6.last_new_reason == "fresh",
+      f"sid={sid} reason={c6.last_new_reason}")
+
+# 19) prvni request v nove pi session = first-in-session
+c7 = ConvCache(state_path=os.path.join(tempfile.mkdtemp(), "s7.json"))
+c7.set_current("pi-session-DDD")
+sid, _, _ = c7.lookup([SYS, A1])
+check("19. prvni request = first-in-session",
+      sid is None and c7.last_new_reason == "first-in-session",
+      f"reason={c7.last_new_reason}")
+
+# 20) zmena historie (komprese) = history-changed
+c7.bind([SYS, A1], "chat-D", 2)
+sid, _, _ = c7.lookup([SYS, B[1]])
+check("20. zmenena historie = history-changed",
+      sid is None and c7.last_new_reason == "history-changed",
+      f"reason={c7.last_new_reason}")
+
+# 21) uspesne navazani nema zadny "new reason"
+sid, _, _ = c7.lookup([SYS, A1, A2, A3])
+check("21. navazani delta tahu nema duvod novyho chatu",
+      sid == "chat-D" and c7.last_new_reason is None,
+      f"sid={sid} reason={c7.last_new_reason}")
+
+# 22) adopce sirotka prezije restart (zapis do stavoveho souboru)
+tmp2 = os.path.join(tempfile.mkdtemp(), "s8.json")
+c8 = ConvCache(state_path=tmp2)
+c8.bind([SYS, A1], "chat-R", 5)
+c8.set_current("pi-session-EEE")
+c9 = ConvCache(state_path=tmp2)
+c9.set_current("pi-session-EEE")
+sid, parent, _ = c9.lookup([SYS, A1, A2, A3])
+check("22. adoptovany chat prezije restart shimu",
+      sid == "chat-R" and parent == 5, f"sid={sid} parent={parent}")
+
 print()
 if FAILED:
     print(f"SELHALO: {len(FAILED)} — {', '.join(FAILED)}")

@@ -95,6 +95,14 @@ class ConvCache:
         self._lock = threading.Lock()
         self._entries: dict[str, Entry] = {}
         self._current: str | None = None
+        # duvod, proc `lookup()` vratil None (= bude se zakladat novy chat).
+        # Cte se hned po lookup() a pise do logu u `novy chat …` — bez toho
+        # nebylo z logu poznat, proc chatu pribyva (viz 4 chaty z 1 konverzace:
+        # race s /session, compact, zmena historie).
+        self.last_new_reason: str | None = None
+        # pro ktery klic bylo naposledy pozadano `fresh` (compact/new) — aby
+        # se v logu rozlisilo "fresh" od "prvni request po startu"
+        self._fresh_key: str | None = None
         self.state_path = state_path if state_path is not None else DEFAULT_STATE
         self._load()
 
@@ -140,12 +148,34 @@ class ConvCache:
         """Nastavi klic aktualni konverzace (ID pi session).
 
         fresh=True (reason=new) zahodi stav, aby se zacalo novym chatem.
+
+        Zaroven **adoptuje osirele `fp:` zaznamy** — ty vzniknou, kdyz pi
+        posle prvni `chat/completions` driv, nez extension stihne
+        `POST /session`. `bind()` v tu chvili nema `_current`, takze entry
+        ulozi pod `fp:<otisk>` misto pod ID pi session; `lookup()` ji pak
+        pod ID nenajde a zalozi NOVY chat (presne tohle delalo 4 chaty
+        z jedne konverzace). Adoptujeme tu nejnovejsi; ostatni sirotky
+        zahodime.
         """
         with self._lock:
             self._current = key or None
-            if fresh and self._current:
+            if not self._current:
+                return
+            orphans = [k for k in self._entries if k.startswith("fp:")]
+            if orphans:
+                orphans.sort(key=lambda k: -self._entries[k].at)
+                for k in orphans:
+                    e = self._entries.pop(k)
+                    if self._current not in self._entries:
+                        self._entries[self._current] = Entry(
+                            self._current, e.n, e.fp, e.session_id,
+                            e.parent_id, e.last_output, e.model_type)
+            if fresh:
                 self._entries.pop(self._current, None)
-                self._save()
+                self._fresh_key = self._current
+            else:
+                self._fresh_key = None
+            self._save()
 
     def current(self) -> str | None:
         return self._current
@@ -180,6 +210,7 @@ class ConvCache:
         with self._lock:
             self._gc_locked()
             n_all = len(messages)
+            self.last_new_reason = None
 
             # 1) podle ID pi session (deterministicke, prezije restart)
             if self._current:
@@ -193,6 +224,14 @@ class ConvCache:
                         e.at = time.time()
                         return e.session_id, e.parent_id, messages[e.n :]
                     # historie se zmenila (komprese/rewrite) -> novy chat
+                    self.last_new_reason = "history-changed"
+                elif self._fresh_key == self._current:
+                    # prislo explicitni fresh (session_compact / reason=new)
+                    self.last_new_reason = "fresh"
+                else:
+                    # prvni request v teto pi session (nebo restart shimu
+                    # bez ulozeneho stavu) -> legitimne novy chat
+                    self.last_new_reason = "first-in-session"
                 return None, None, messages
 
             # 2) fallback: porovnani prefixu (klient bez ID session)
@@ -204,6 +243,7 @@ class ConvCache:
                     if e.n == n_all:
                         return e.session_id, e.parent_id, None
                     return e.session_id, e.parent_id, messages[e.n :]
+            self.last_new_reason = "no-session-id"
             return None, None, messages
 
     def cached_output(self, session_id: str):

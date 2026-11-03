@@ -252,6 +252,8 @@ def complete_stream(body: dict):
     # prefix zprav), takze kratime az po nem — jinak by se konverzace
     # nedohledala a prisli bychom o navazani chatu.
     session_id, parent_id, delta = _convs.lookup(messages)
+    # duvod, proc se bude zakladat novy chat (loguje se u "novy chat …")
+    new_reason = _convs.last_new_reason or "?"
     if session_id and delta is None:
         # presny retry stejneho stavu (viz ConvCache.lookup) — DeepSeek uz
         # tyto zpravy MA v historii chatu, takze se NESMI poslat znovu jako
@@ -270,6 +272,7 @@ def complete_stream(body: dict):
               f"ale cache je prazdna (restart?) -> novy chat", file=sys.stderr)
         _convs.drop(session_id)
         session_id = None
+        new_reason = "retry-cache-empty"
     if session_id:
         # i delta muze byt obrovska (velky vysledek nastroje)
         delta, dtrim = cap_messages(delta, MAX_PROMPT_CHARS // 2)
@@ -290,6 +293,7 @@ def complete_stream(body: dict):
             print(f"[shim] delta tah selhal ({kind}: {e}) -> zkusim cely novy chat",
                   file=sys.stderr)
             _convs.drop(session_id)
+            new_reason = f"delta-failed:{kind}"
 
     # novy chat (nebo fallback): cela historie jako jeden prompt
     full, trimmed = cap_messages(messages, MAX_PROMPT_CHARS)
@@ -303,7 +307,8 @@ def complete_stream(body: dict):
     # requestu (appka to tak dela; null by mohl byt anomalie).
     mt = getattr(api, "model_type", None) or session.get("model_type")
     print(f"[shim] novy chat {sid[:8]}… (cely kontext: {len(prompt)} znaku, "
-          f"{len(full)} zprav, model_type={mt})", file=sys.stderr)
+          f"{len(full)} zprav, model_type={mt}, duvod={new_reason})",
+          file=sys.stderr)
     try:
         yield from _try_stream(api, sid, prompt, None, thinking, temp,
                                model_type=mt)
