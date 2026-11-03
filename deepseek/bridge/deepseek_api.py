@@ -18,6 +18,14 @@ import urllib.request
 
 BASE = "https://chat.deepseek.com"
 
+# Vychozi teplota, kterou shim posila v kazdem completion requestu.
+# Appka `temperature` neposila (server pouzije svuj default), ale uplne
+# chybejici pole je taky anomalie — bot, ktery nezna sve vlastni parametry.
+# 0.3 je nizsi nez chat-default appky: mene halucinaci, spolehlivejsi tool
+# cally. Prebije se pres SHIM_TEMPERATURE / FRIDA_MCP_TEMPERATURE nebo
+# teplotou z requestu klienta.
+DEFAULT_TEMPERATURE = 0.3
+
 # Biznisove kody, ktere znamenaji "neplatny/neprihlaseny token" -> staci
 # obnovit token a zkusit znovu (nikoliv trvat error).
 AUTH_BIZ_CODES = {40001, 40004, 40008, 40009, 40011, 40013, 40301, 40302}
@@ -351,15 +359,25 @@ class DeepSeekAPI:
         act = kw.get("action")
         if act:
             body["action"] = act
-        # temperature — volitelne, appka ho neposila
+        # temperature — POSILAME VZDY (vychozi DEFAULT_TEMPERATURE).
+        # Poradi: request klienta > SHIM_TEMPERATURE / FRIDA_MCP_TEMPERATURE
+        # > DEFAULT_TEMPERATURE.
         temp = None
         if "temperature" in kw and kw["temperature"] is not None:
             temp = kw["temperature"]
-        elif (env := os.environ.get("FRIDA_MCP_TEMPERATURE")) is not None:
-            try: temp = float(env)
-            except ValueError: pass
-        if temp is not None:
-            body["temperature"] = temp
+        else:
+            for _env in ("SHIM_TEMPERATURE", "FRIDA_MCP_TEMPERATURE"):
+                _raw = os.environ.get(_env)
+                if _raw is None or _raw.strip() == "":
+                    continue
+                try:
+                    temp = float(_raw)
+                    break
+                except ValueError:
+                    continue
+        if temp is None:
+            temp = DEFAULT_TEMPERATURE
+        body["temperature"] = temp
         h = dict(self.headers)
         h["Authorization"] = "Bearer " + self.token
         h["Content-Type"] = "application/json"
