@@ -123,11 +123,22 @@ class ConvCache:
                     model_type=e.get("model_type"))
             except Exception:  # noqa: BLE001
                 continue
+        # `_current` MUSI prezit restart shimu. Extension si shim sam
+        # restartuje, kdyz zjisti, ze bezi zastaraly kod — a `POST /session`
+        # uz pak neposle. Bez tohohle byl po restartu `_current=None`, kazdy
+        # request sel pres `fp:` vetev a kazda jina historie zalozila NOVY
+        # chat (v praxi 2 chaty nazvane "test" z jednoho dotazu).
+        cur = raw.get("current")
+        if cur and cur in self._entries:
+            self._current = cur
 
     def _save(self) -> None:
         try:
             os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
             data = {
+                # `current` = ID pi session; po restartu shimu se podle nej
+                # znovu najde spravny chat (viz _load).
+                "current": self._current,
                 "entries": {
                     k: {"n": e.n, "fp": e.fp, "session_id": e.session_id,
                         "parent_id": e.parent_id, "at": e.at,

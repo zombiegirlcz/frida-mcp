@@ -382,6 +382,22 @@ function runDetached(cmd: string, args: string[], logName?: string, cwd = ROOT):
 
 let bootstrapRunning = false;
 
+/**
+ * ID posledni pi session, kterou jsme rekli shimum.
+ *
+ * Proc to drzime: `startShims()` muze shim restartovat UPROSTRED session
+ * (detekce zastaraleho kodu). Novy proces ale `POST /session` nedostane —
+ * extension ho posila jen v `session_start`, ktery uz probehl. Shim pak
+ * nema `_current`, kazdy request jde pres `fp:` vetev a kazda jina
+ * historie zalozí NOVY chat (v praxi 2 chaty nazvane "test" z jednoho
+ * dotazu). Po startu shimu proto session znovu posleme.
+ */
+let lastPiSessionId: string | undefined;
+
+/** Soubezna volani `startShims()` se seradi za sebou (jinak dva procesy
+ *  zabiraji stejny port a jeden z nich spadne na `Address already in use`). */
+let shimStartLock: Promise<unknown> = Promise.resolve();
+
 export function startBootstrap(): void {
   if (bootstrapRunning) {
     log("bootstrap už běží — přeskakuji");
@@ -584,6 +600,18 @@ export function shimStaleReason(script: string, extraDirs: string[]): string | n
 }
 
 export async function startShims(py: string, force = false): Promise<string[]> {
+  const prev = shimStartLock;
+  let release: () => void = () => {};
+  shimStartLock = new Promise<void>((r) => { release = r; });
+  await prev.catch(() => {});
+  try {
+    return await startShimsLocked(py, force);
+  } finally {
+    release();
+  }
+}
+
+async function startShimsLocked(py: string, force = false): Promise<string[]> {
   const out: string[] = [];
   if (force) {
     const n = stopShims();
@@ -623,6 +651,14 @@ export async function startShims(py: string, force = false): Promise<string[]> {
     runDetached(py, [script, "--port", String(port)], `${name}.log`);
     out.push(`${name}: startuji na ${port}`);
     log(`startuji ${name} (${script} --port ${port})`);
+  }
+  // Shim mohl byt prave restartovan uprostred session -> rekni mu znovu,
+  // ktera pi session je aktivni. Bez toho novy proces nevi o `_current`
+  // a kazda jina historie mu zalozí novy chat.
+  if (lastPiSessionId) {
+    await new Promise((r) => setTimeout(r, 600));
+    await tellSession(lastPiSessionId, "resync");
+    log(`shimy nastartovany -> resync pi-session=${lastPiSessionId.slice(0, 8)}…`);
   }
   return out;
 }
@@ -673,9 +709,6 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
         // až bootstrap doběhne, dojde k tomu v příští session
         return;
       }
-      const py = findPython();
-      if (py && pythonOk(py)) await startShims(py);
-
       // Synchronizace s pi session: jeden pi session = jeden chat.
       const reason = String(event?.reason ?? "startup");
       let sid: string | undefined;
@@ -685,6 +718,13 @@ export default async function fridaMcp(pi: ExtensionAPI): Promise<void> {
         sid = undefined;
       }
       if (!sid) sid = process.env.PI_SESSION_ID;
+      // POZOR NA PORADI: `lastPiSessionId` musi byt nastaveno PRED
+      // `startShims()` — ten muze shim restartovat a na konci sam posila
+      // resync. Kdybychom ho nastavili az po, resync by sel se starym ID.
+      lastPiSessionId = sid;
+
+      const py = findPython();
+      if (py && pythonOk(py)) await startShims(py);
       await tellSession(sid, reason);
       log(`session_start: reason=${reason} pi-session=${sid ? sid.slice(0, 8) : "?"}…`);
     } catch (e) {

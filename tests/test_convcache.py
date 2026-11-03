@@ -209,6 +209,39 @@ sid, parent, _ = c9.lookup([SYS, A1, A2, A3])
 check("22. adoptovany chat prezije restart shimu",
       sid == "chat-R" and parent == 5, f"sid={sid} parent={parent}")
 
+# ------------------------------------- restart shimu UPROSTRED session
+# V praxi (2026-11-03): extension si shim sam restartoval (detekce
+# zastaraleho kodu) uprostred session. `_current` se neperzistoval, takze
+# novy proces nemel ID pi session -> kazdy request sel pres `fp:` vetev
+# a z jednoho dotazu "test" byly 2 chaty (d9b9434b, 1ee47147).
+tmp3 = os.path.join(tempfile.mkdtemp(), "s9.json")
+c10 = ConvCache(state_path=tmp3)
+c10.set_current("pi-session-FFF")
+c10.lookup([SYS, A1])
+c10.bind([SYS, A1], "chat-F", 4)
+
+c11 = ConvCache(state_path=tmp3)  # simulace restartu shimu
+check("23. _current prezije restart shimu",
+      c11.current() == "pi-session-FFF", f"current={c11.current()}")
+sid, parent, delta = c11.lookup([SYS, A1, A2, A3])
+check("24. po restartu se navaze STEJNY chat (ne novy)",
+      sid == "chat-F" and parent == 4 and len(delta) == 2,
+      f"sid={sid} parent={parent} delta={len(delta)}")
+
+# 25) fresh (compact) po restartu porad znamena novy chat
+c11.set_current("pi-session-FFF", fresh=True)
+sid, _, _ = c11.lookup([SYS, A1, A2, A3])
+check("25. fresh po restartu -> novy chat",
+      sid is None and c11.last_new_reason == "fresh",
+      f"sid={sid} reason={c11.last_new_reason}")
+
+# 26) ukazatel na neexistujici session se pri nacteni ignoruje
+c12 = ConvCache(state_path=tmp3)
+c12.clear()
+c13 = ConvCache(state_path=tmp3)
+check("26. osirely _current se pri nacteni zahodi",
+      c13.current() is None, f"current={c13.current()}")
+
 print()
 if FAILED:
     print(f"SELHALO: {len(FAILED)} — {', '.join(FAILED)}")
