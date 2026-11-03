@@ -194,7 +194,8 @@ def complete_stream(body: dict):
 
     Pri auth chybe (DeepSeekError.retry) -> zkusime refresh token + 1 retry.
     """
-    def _try_stream(api, session_id, prompt, parent_id, thinking, temp):
+    def _try_stream(api, session_id, prompt, parent_id, thinking, temp,
+                    model_type=None):
         """Zkus stream, pri DeepSeekError.retry -> refresh token + retry jednou.
 
         Vystup se zaroven cachuje do convcache (last_output) — kdyz pi
@@ -207,14 +208,16 @@ def complete_stream(body: dict):
         for attempt in range(2):
             out: list[tuple[str, str]] = []
             try:
-                for kind, text in api.completion_stream(session_id, prompt,
-                                                         parent_message_id=parent_id,
-                                                         thinking_enabled=thinking,
-                                                         temperature=temp):
+                for kind, text in api.completion_stream(
+                        session_id, prompt,
+                        parent_message_id=parent_id,
+                        thinking_enabled=thinking,
+                        temperature=temp,
+                        model_type=model_type):
                     out.append((kind, text))
                     yield kind, text
                 _convs.bind(messages, session_id, api.last_response_message_id,
-                           last_output=out)
+                           last_output=out, model_type=model_type)
                 return
             except DeepSeekError as e:
                 if not e.retry or attempt == 1:
@@ -274,8 +277,13 @@ def complete_stream(body: dict):
         print(f"[shim] delta tah v chatu {session_id[:8]}… "
               f"({len(delta)} novych zprav, {len(prompt)} znaku"
               f"{', ZKRACENO' if dtrim else ''})", file=sys.stderr)
+        # model_type musi jit s kazdym dalsim tahem — appka ho posila
+        # vzdy (server si ho pamatuje ze chat_session/create). Kdyz chybi,
+        # server to muze vyhodnotit jako nekonzistenci/anomalii.
+        mt = _convs.model_type_for(session_id)
         try:
-            yield from _try_stream(api, session_id, prompt, parent_id, thinking, temp)
+            yield from _try_stream(api, session_id, prompt, parent_id, thinking,
+                                   temp, model_type=mt)
             return
         except Exception as e:  # noqa: BLE001
             kind = "limit delky" if getattr(e, "length_limited", False) else "chyba"
@@ -291,10 +299,14 @@ def complete_stream(body: dict):
     prompt = build_prompt(full, tools)
     session = api.create_session()
     sid = session["id"]
+    # model_type vraceny serverem — posilame ho zpet v kazdem completion
+    # requestu (appka to tak dela; null by mohl byt anomalie).
+    mt = getattr(api, "model_type", None) or session.get("model_type")
     print(f"[shim] novy chat {sid[:8]}… (cely kontext: {len(prompt)} znaku, "
-          f"{len(full)} zprav)", file=sys.stderr)
+          f"{len(full)} zprav, model_type={mt})", file=sys.stderr)
     try:
-        yield from _try_stream(api, sid, prompt, None, thinking, temp)
+        yield from _try_stream(api, sid, prompt, None, thinking, temp,
+                               model_type=mt)
     except Exception as e:  # noqa: BLE001
         if getattr(e, "length_limited", False):
             # Zkraceny prompt je porad moc dlouhy -> zkusime jeste agresivneji.
@@ -305,7 +317,7 @@ def complete_stream(body: dict):
             full2, _ = cap_messages(messages, smaller)
             try:
                 yield from _try_stream(api, sid, build_prompt(full2, tools),
-                                       None, thinking, temp)
+                                       None, thinking, temp, model_type=mt)
             except Exception as e2:  # noqa: BLE001
                 print(f"[shim] novy chat taky selhal ({e2})", file=sys.stderr)
                 raise
@@ -315,7 +327,7 @@ def complete_stream(body: dict):
 
     # bind() musi dostat PUVODNI historii (ne zkracenou) — jinak by pristi
     # tah neodpovidal prefixu a zakladal by se novy chat pokazde.
-    _convs.bind(messages, sid, api.last_response_message_id)
+    _convs.bind(messages, sid, api.last_response_message_id, model_type=mt)
 
 
 def complete(body: dict) -> str:

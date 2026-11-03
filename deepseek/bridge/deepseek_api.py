@@ -131,6 +131,11 @@ class DeepSeekAPI:
         self._last_frag_type = "RESPONSE"
         self.pow = pow_helper
         self.headers = dict(BASE_HEADERS)
+        # model_type vraci server pri chat_session/create (napr. "chat",
+        # "expert", "default"). Appka ho pak posila zpet v KAZDEM
+        # /api/v0/chat/completion — bez nej je request vuci serveru
+        # nekonzistentni (a muze to byt detekovano jako anomalie).
+        self.model_type: str | None = None
         if device_id:
             self.headers["x-device-id"] = device_id
 
@@ -165,6 +170,15 @@ class DeepSeekAPI:
         chat = bd.get("chat_session") if isinstance(bd, dict) else None
         if not chat:
             raise DeepSeekError("chat_session/create: zadny chat_session: " + str(r)[:160])
+        # zapamatuj si model_type teto session (server ho posila zpet v
+        # kazdem completion requestu — viz ChatFullCompletionRequest
+        # v appce: chat_session_id, parent_message_id, prompt,
+        # ref_file_ids, thinking_enabled, search_enabled, audio_id,
+        # preempt, model_type, action)
+        try:
+            self.model_type = chat.get("model_type") or None
+        except AttributeError:
+            self.model_type = None
         return chat
 
     def create_pow_challenge(self, target_path="/api/v0/chat/completion") -> dict:
@@ -311,6 +325,13 @@ class DeepSeekAPI:
         answer = self._solve(challenge)
         hdr = self.pow_header(challenge, answer)
 
+        # Presne pole jako ChatFullCompletionRequest v appce (iz1.java):
+        #   chat_session_id, parent_message_id, prompt, ref_file_ids,
+        #   thinking_enabled, search_enabled, audio_id, preempt,
+        #   model_type, action
+        # POZOR: appka NEPOSILA `temperature` — server pouzije svuj default.
+        # Nas shim ho drive posilal (0.3) a muze to byt anomalie vuci serveru.
+        # Env FRIDA_MCP_TEMPERATURE ho zapne (napr. pro ladeni tool-callu).
         body = {
             "chat_session_id": session_id,
             "parent_message_id": kw.get("parent_message_id"),
@@ -318,19 +339,27 @@ class DeepSeekAPI:
             "ref_file_ids": kw.get("ref_file_ids", []),
             "thinking_enabled": kw.get("thinking_enabled", False),
             "search_enabled": kw.get("search_enabled", False),
+            "preempt": False,
         }
-        # Teplota (API ji respektuje — testovano 0.0 vs 2.0):
-        # Env FRIDA_MCP_TEMPERATURE přepíše default; jinak posíláme 0.3
-        # pro spolehlivost tool-callů místo nekontrolované high-temp.
+        # model_type — appka ho bere z chat_session (server response) a
+        # posila zpet v kazdem completion. Kdyz ho nemame, neposilame.
+        mt = kw.get("model_type") or self.model_type
+        if mt:
+            body["model_type"] = mt
+        # action — None = fresh send, "retry" = retry (appka posila "retry"
+        # pri znovuzaslani po chybe). Default None (= vynechano).
+        act = kw.get("action")
+        if act:
+            body["action"] = act
+        # temperature — volitelne, appka ho neposila
         temp = None
         if "temperature" in kw and kw["temperature"] is not None:
             temp = kw["temperature"]
         elif (env := os.environ.get("FRIDA_MCP_TEMPERATURE")) is not None:
             try: temp = float(env)
             except ValueError: pass
-        if temp is None:
-            temp = 0.3  # default pro spolehlivost
-        body["temperature"] = temp
+        if temp is not None:
+            body["temperature"] = temp
         h = dict(self.headers)
         h["Authorization"] = "Bearer " + self.token
         h["Content-Type"] = "application/json"

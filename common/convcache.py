@@ -62,16 +62,22 @@ def fingerprint(messages: list[dict]) -> str:
 
 
 class Entry:
-    __slots__ = ("key", "n", "fp", "session_id", "parent_id", "at", "last_output")
+    __slots__ = ("key", "n", "fp", "session_id", "parent_id", "at",
+                 "last_output", "model_type")
 
     def __init__(self, key: str, n: int, fp: str, session_id: str, parent_id=None,
-                 last_output=None):
+                 last_output=None, model_type=None):
         self.key = key
         self.n = n
         self.fp = fp
         self.session_id = session_id
         self.parent_id = parent_id
         self.at = time.time()
+        # model_type vraceny serverem pri chat_session/create (napr. "chat",
+        # "expert", "default"). Appka ho posila zpet v kazdem completion
+        # requestu; musi prezit i restart shimu, jinak dalsi tah posle
+        # model_type=null a server to muze vyhodnotit jako anomalii.
+        self.model_type = model_type
         # Raw (kind, text) chunky z posledni USPESNE dokoncene odpovedi pro
         # tento presny stav historie. Pouziva se jen pro exact-retry replay
         # (viz lookup()) — NEPERZISTUJE se na disk (jen in-memory cache pro
@@ -105,7 +111,8 @@ class ConvCache:
                 if now - float(e.get("at", 0)) > MAX_AGE:
                     continue
                 self._entries[key] = Entry(
-                    key, int(e["n"]), e["fp"], e["session_id"], e.get("parent_id"))
+                    key, int(e["n"]), e["fp"], e["session_id"], e.get("parent_id"),
+                    model_type=e.get("model_type"))
             except Exception:  # noqa: BLE001
                 continue
 
@@ -115,7 +122,8 @@ class ConvCache:
             data = {
                 "entries": {
                     k: {"n": e.n, "fp": e.fp, "session_id": e.session_id,
-                        "parent_id": e.parent_id, "at": e.at}
+                        "parent_id": e.parent_id, "at": e.at,
+                        "model_type": e.model_type}
                     for k, e in self._entries.items()
                 },
             }
@@ -211,18 +219,28 @@ class ConvCache:
             return None
 
     def bind(self, messages: list[dict], session_id: str, parent_id=None,
-             last_output=None) -> None:
+             last_output=None, model_type=None) -> None:
         """Zapise, ze konverzace ma danou session a je u zpravy len(messages).
 
         `last_output` (volitelne): raw (kind, text) chunky odpovedi, co ji
         tenhle tah vyprodukoval — cachuje se pro exact-retry (viz lookup()).
+        `model_type` (volitelne): model_type vraceny serverem pri
+        chat_session/create; posila se zpet v dalsich completion requestech.
         """
         with self._lock:
             key = self._current or f"fp:{fingerprint(messages)[:16]}"
+            # zachovej model_type z existujiciho zaznamu, pokud ho tentokrat
+            # nemame (bind se muze volat i bez nej)
+            prev_mt = None
+            for e in self._entries.values():
+                if e.session_id == session_id and e.model_type:
+                    prev_mt = e.model_type
+                    break
             self._entries = {k: e for k, e in self._entries.items()
                              if e.session_id != session_id}
             self._entries[key] = Entry(key, len(messages), fingerprint(messages),
-                                       session_id, parent_id, last_output)
+                                       session_id, parent_id, last_output,
+                                       model_type or prev_mt)
             self._gc_locked()
             self._save()
 
@@ -232,6 +250,14 @@ class ConvCache:
                 if e.session_id == session_id:
                     e.parent_id = parent_id
             self._save()
+
+    def model_type_for(self, session_id: str):
+        """Vrati ulozeny model_type pro danou session, nebo None."""
+        with self._lock:
+            for e in self._entries.values():
+                if e.session_id == session_id and e.model_type:
+                    return e.model_type
+            return None
 
     def drop(self, session_id: str) -> None:
         """Zahodi konverzaci (napr. kdyz delta request selhal)."""
