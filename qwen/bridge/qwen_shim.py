@@ -35,6 +35,7 @@ from bridge.qwen_api import (DEFAULT_MODEL, TOKEN_CACHE, QwenAPI,
                             QwenError)
 from common.convcache import ConvCache
 from common.netfix import install_dns_cache
+from common import shimauth
 from common.toolbridge import (MAX_CALLS_PER_TURN, StreamSplitter, build_prompt,
                                cap_messages, parse_tool_calls, tool_specs,
                                to_openai_tool_calls, tool_names)
@@ -235,6 +236,15 @@ class Handler(BaseHTTPRequestHandler):
         if os.environ.get("SHIM_VERBOSE"):
             sys.stderr.write("[qwen-shim] " + (fmt % args) + "\n")
 
+    def _authed(self) -> bool:
+        """Volitelna kontrola `Authorization: Bearer <SHIM_API_KEY>` (viz common/shimauth.py)."""
+        ok, why = shimauth.check_request(self.path, self.headers.get("Authorization"))
+        if not ok:
+            print(f"[qwen-shim] 401 {self.command} {self.path}: {why}", file=sys.stderr)
+            self._json(401, {"error": {"message": f"unauthorized: {why}",
+                                       "type": "invalid_request_error"}})
+        return ok
+
     def _json(self, code: int, obj: dict) -> None:
         data = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
@@ -245,7 +255,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):  # noqa: N802
+        if not self._authed():
+            return
         p = self.path.rstrip("/")
+        if p.endswith("/health") or p.endswith("/healthz"):
+            self._json(200, {"ok": True, "models": MODELS,
+                             "auth": bool(shimauth.api_key())})
+            return
         if p.endswith("/models"):
             self._json(200, {"object": "list", "data": [
                 {"id": m, "object": "model", "created": int(time.time()),
@@ -257,6 +273,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": {"message": "not found"}})
 
     def do_POST(self):  # noqa: N802
+        if not self._authed():
+            return
         if self.path.rstrip("/").endswith("/session"):
             # Synchronizace s pi: extension posila ID pi session, podle ktereho
             # urcime, ktery chat pouzit (a ktery prezije restart).
@@ -459,14 +477,20 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("QWEN_SHIM_PORT", "13360")))
-    ap.add_argument("--host", default="127.0.0.1")
+    # `SHIM_HOST=0.0.0.0` vystavi shim na sit (s SHIM_API_KEY).
+    ap.add_argument("--host", default=shimauth.bind_host())
     a = ap.parse_args()
     # Odolný DNS: v proot guestu obcas selze resolvování (Errno -3) a shodil
     # by cely tah. Cache + opakovani + fallback na posledni uspesny výsledek.
     _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     install_dns_cache(os.path.join(_root, "logs", "dns_cache.json"))
+    if a.host not in ("127.0.0.1", "localhost", "::1") and not shimauth.api_key():
+        print("[qwen-shim] POZOR: posloucham na siti bez SHIM_API_KEY — kdokoli na "
+              "siti muze pouzivat Qwen ucet! Nastav SHIM_API_KEY.", file=sys.stderr,
+              flush=True)
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
-    print(f"[qwen-shim] qwen-free na http://{a.host}:{a.port}/v1  modely={','.join(MODELS)}",
+    print(f"[qwen-shim] qwen-free na http://{a.host}:{a.port}/v1  "
+          f"modely={','.join(MODELS)}  auth={'bearer' if shimauth.api_key() else 'off'}",
           flush=True)
     try:
         srv.serve_forever()

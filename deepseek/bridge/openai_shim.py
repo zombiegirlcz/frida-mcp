@@ -31,6 +31,7 @@ for _p in (_PKG, _REPO):
 
 from bridge.deepseek_api import DeepSeekAPI
 from common.netfix import install_dns_cache
+from common import shimauth
 from common.tokenauto import ensure_token
 from common.toolbridge import (TOOLS_REMINDER, StreamSplitter, _strip_stray_tags,
                                cap_messages, tool_specs,
@@ -347,6 +348,19 @@ class Handler(BaseHTTPRequestHandler):
         if os.environ.get("SHIM_VERBOSE"):
             sys.stderr.write("[shim] " + (fmt % args) + "\n")
 
+    def _authed(self) -> bool:
+        """Volitelna kontrola `Authorization: Bearer <SHIM_API_KEY>`.
+
+        Bez `SHIM_API_KEY` v prostredi se neoveruje (lokalni provoz).
+        Kdyz je nastaven, chrani ucet appky i PoW pred kymkoli na siti.
+        """
+        ok, why = shimauth.check_request(self.path, self.headers.get("Authorization"))
+        if not ok:
+            print(f"[shim] 401 {self.command} {self.path}: {why}", file=sys.stderr)
+            self._json(401, {"error": {"message": f"unauthorized: {why}",
+                                     "type": "invalid_request_error"}})
+        return ok
+
     def _json(self, code: int, obj: dict) -> None:
         data = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
@@ -357,7 +371,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):  # noqa: N802
+        if not self._authed():
+            return
         p = self.path.rstrip("/")
+        if p.endswith("/health") or p.endswith("/healthz"):
+            self._json(200, {"ok": True, "model": MODEL,
+                             "auth": bool(shimauth.api_key())})
+            return
         if p.endswith("/models"):
             self._json(200, {"object": "list", "data": [
                 {"id": MODEL, "object": "model", "created": int(time.time()),
@@ -370,6 +390,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": {"message": "not found"}})
 
     def do_POST(self):  # noqa: N802
+        if not self._authed():
+            return
         # Reset konverzaci -> pristi request posle CELOU historii v novem chatu.
         # Pouziva se, kdyz se prerusil predchozi tah a delta by sla do session,
         # ktera uz kontext nema (model by "zacal znovu").
@@ -532,7 +554,9 @@ def _err_text(e: BaseException) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("SHIM_PORT", "13350")))
-    ap.add_argument("--host", default="127.0.0.1")
+    # `SHIM_HOST=0.0.0.0` vystavi shim na sit (nutne k tomu nastavit
+    # SHIM_API_KEY, jinak je ucet appky otevreny komukoli na siti).
+    ap.add_argument("--host", default=shimauth.bind_host())
     a = ap.parse_args()
     # Odolný DNS: v proot guestu obcas selze resolvování (Errno -3) a shodil
     # by cely tah. Cache + opakovani + fallback na posledni uspesny výsledek.
@@ -547,8 +571,13 @@ def main() -> int:
         print("[shim] POZOR: token zatím chybí — vytáhnu ho při prvním requestu "
               "(je DeepSeek appka nainstalovaná a přihlášená?)", file=sys.stderr,
               flush=True)
+    if a.host not in ("127.0.0.1", "localhost", "::1") and not shimauth.api_key():
+        print("[shim] POZOR: posloucham na siti bez SHIM_API_KEY — kdokoli na siti "
+              "muze pouzivat DeepSeek ucet! Nastav SHIM_API_KEY.", file=sys.stderr,
+              flush=True)
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
-    print(f"[shim] deepseek-free (nativni PoW, bez fridy) na http://{a.host}:{a.port}/v1  model={MODEL}",
+    print(f"[shim] deepseek-free (nativni PoW, bez fridy) na http://{a.host}:{a.port}/v1  "
+          f"model={MODEL}  auth={'bearer' if shimauth.api_key() else 'off'}",
           flush=True)
     try:
         srv.serve_forever()

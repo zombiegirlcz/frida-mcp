@@ -432,6 +432,55 @@ terminálu, aby nerozbil TUI).
 
 ---
 
+## Síťový provoz (proxy pro jiné nástroje)
+
+Shim je OpenAI-compatible server, takže se dá použít jako „provider" pro
+jakýkoli nástroj, který umí `base_url` + `api_key`. Defaultně poslouchá jen
+na `127.0.0.1` a klíč **neověřuje**.
+
+Pro přístup z jiného stroje/kontejneru (nebo aby se dal zamknout):
+
+```bash
+# na stroji, kde běží shim (a je tam DeepSeek/Qwen appka)
+export SHIM_HOST=0.0.0.0          # poslouchat na síti
+export SHIM_API_KEY=tajne123      # BEZ tohohle je účet appky otevřený komukoli!
+python3 deepseek/bridge/openai_shim.py --port 13350
+
+# kontrola
+curl -s localhost:13350/health     # {"ok": true, "auth": true}
+```
+
+Klient (jiný nástroj, jiný stroj, pi) pak dostane:
+
+| | hodnota |
+|---|---|
+| Base URL | `http://<ip-shimu>:13350/v1` |
+| API key  | `tajne123` (posílá se jako `Authorization: Bearer …`) |
+| Model    | `deepseek-chat` / `deepseek-reasoner` |
+| Qwen     | `http://<ip-shimu>:13360/v1`, modely `qwen3.7-plus`, `qwen3.8-max`, … |
+
+Pro pi se to nastavuje v `~/.pi/agent/models.json` (viz `PROVIDERS` v
+`extensions/frida-mcp.ts`). Extension zná i env override:
+
+```bash
+FRIDA_MCP_PROXY=http://192.168.1.10:13350   # celé base URL (přebije port i host)
+FRIDA_MCP_HOST=192.168.1.10                 # jen host, port zůstane 13350/13360
+FRIDA_MCP_API_KEY=tajne123                  # co posílat jako apiKey
+SHIM_API_KEY=tajne123                       # stejný klíč i pro interní /session, /reset
+```
+
+Poznámky:
+
+- `SHIM_API_KEY` chrání **všechno** kromě `/health`, `/healthz`, `/ping`.
+- Bez `SHIM_API_KEY` shim funguje jako dřív (loopback, klíč se ignoruje) —
+  zpětná kompatibilita pro lokální pi.
+- Pokud nastavíš `SHIM_HOST` na síťovou adresu **bez** `SHIM_API_KEY`, shim
+  vypíše na stderr výstrahu — kdokoli na síti by mohl používat tvůj účet.
+- Pro veřejný internet to **nepoužívej** — dej před to reverzní proxy s TLS
+  (Caddy/nginx) a ideálně IP allowlist.
+
+---
+
 ## Bezpečnost
 
 ⚠️ **Tokeny jsou živé přihlašovací údaje k účtu.** Appky je drží v plaintextu a

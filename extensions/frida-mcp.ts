@@ -88,6 +88,30 @@ export function log(msg: string): void {
 export const DEEPSEEK_PORT = 13350;
 export const QWEN_PORT = 13360;
 
+/**
+ * Adresa, na ktere klient (pi i jine nastroje) hleda shim.
+ *
+ * Default je loopback. Pro sit/kontejner/vzdaleny stroj:
+ *   FRIDA_MCP_PROXY=http://192.168.1.10:13350   # cely base URL
+ *   SHIM_HOST=0.0.0.0   # aby shim vubec poslouchal na siti
+ *   SHIM_API_KEY=...    # aby ho nemohl pouzivat kdokoli
+ *
+ * Kdyz je `FRIDA_MCP_PROXY` nastavena, pouzije se pro OBa providery (port
+ * z env, nebo default). Kdyz je nastavena jen `FRIDA_MCP_HOST`, sklada se
+ * `http://<host>:<port>/v1`.
+ */
+function shimBaseUrl(port: number): string {
+  const explicit = (process.env.FRIDA_MCP_PROXY || "").trim();
+  if (explicit) return explicit.replace(/\/+$/, "");
+  const host = (process.env.FRIDA_MCP_HOST || "127.0.0.1").trim();
+  return `http://${host}:${port}/v1`;
+}
+
+/** API klic, ktery klient posila shimu (shim ho overi jen kdyz ma SHIM_API_KEY). */
+export function shimApiKey(): string {
+  return (process.env.FRIDA_MCP_API_KEY || process.env.SHIM_API_KEY || "frida").trim() || "frida";
+}
+
 const COMPAT = {
   supportsDeveloperRole: false,
   supportsReasoningEffort: false,
@@ -112,8 +136,9 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
   "deepseek-free": {
     name: "DeepSeek Free (nativni)",
     api: "openai-completions",
-    apiKey: "frida",
-    baseUrl: `http://127.0.0.1:${DEEPSEEK_PORT}/v1`,
+    apiKey: shimApiKey(),
+    authHeader: true,
+    baseUrl: shimBaseUrl(DEEPSEEK_PORT),
     compat: COMPAT_THINKING,
     models: [
       {
@@ -139,8 +164,9 @@ export const PROVIDERS: Record<string, Record<string, unknown>> = {
   "qwen-free": {
     name: "Qwen Free (nativni)",
     api: "openai-completions",
-    apiKey: "frida",
-    baseUrl: `http://127.0.0.1:${QWEN_PORT}/v1`,
+    apiKey: shimApiKey(),
+    authHeader: true,
+    baseUrl: shimBaseUrl(QWEN_PORT),
     compat: COMPAT_THINKING,
     models: [
       {
@@ -332,9 +358,15 @@ async function getJson(port: number, path: string): Promise<any | null> {
 /** Jednoduchy JSON POST na lokalni shim (null kdyz nebezi). */
 async function postJson(port: number, path: string, body?: any): Promise<any | null> {
   try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    // Kdyz je shim zamceny klicem, musi ho dostat i nase interni volani
+    // (/session, /reset) — jinak po nastaveni SHIM_API_KEY prestane fungovat
+    // synchronizace session.
+    const key = (process.env.SHIM_API_KEY || "").trim();
+    if (key) headers.Authorization = `Bearer ${key}`;
     const r = await fetch(`http://127.0.0.1:${port}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(body ?? {}),
       signal: AbortSignal.timeout(8000),
     });
