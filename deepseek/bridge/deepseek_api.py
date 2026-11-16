@@ -40,6 +40,9 @@ _LENGTH_HINTS = (
     "limit délky", "limit delky", "length limit", "context length",
     "zacnete novy chat", "začněte nový chat", "start a new chat",
     "too long", "maximum context", "kontext je prilis",
+    # "Obsah je příliš dlouhý" / "Obsah je prilis dlouhy" - nove chyby
+    # od DeepSeek, ktere chybi v starsi seznamu.
+    "příliš dlouhý", "prilis dlouhy", "obsah je příliš", "obsah je prilis",
 )
 
 
@@ -63,19 +66,25 @@ def _hint_error(obj: dict) -> "DeepSeekError | None":
     msg = str(obj.get("content") or obj.get("msg") or "").strip()
     fr = str(obj.get("finish_reason") or "")
     low = (msg + " " + fr).lower()
-    is_rate = ("rate_limit" in low or "prilis" in low or "příliš" in low
-               or "too many" in low or "zkuste to znovu" in low)
     text = msg or fr or "neznamy error"
-    if is_rate:
-        return DeepSeekError(
-            f"chat/completion: RATE LIMIT — {text} "
-            f"(agent poslal příliš mnoho dotazů rychle po sobě)",
-            retry=True, rate_limited=True)
+
+    # DELKA MUSI BYT KONTROLOVANA DRIVE NEZ RATE LIMIT!
+    # "Obsah je příliš dlouhý" obsahuje "příliš" coz by spustilo
+    # rate limit detekci kdyz by ta byla prvni.
     if _is_length_error(text):
         # Nema smysl opakovat stejny chat — volajici musi zalozit novy
         # (a hlavne zkratit historii, jinak novy chat narazi na stejny limit).
         return DeepSeekError(f"chat/completion: {text}", retry=False,
                              length_limited=True)
+
+    is_rate = ("rate_limit" in low or "příliš časté" in low or "prilis caste" in low
+               or "too many" in low or "zkuste to znovu" in low)
+    if is_rate:
+        return DeepSeekError(
+            f"chat/completion: RATE LIMIT — {text} "
+            f"(agent poslal příliš mnoho dotazů rychle po sobě)",
+            retry=True, rate_limited=True)
+
     return DeepSeekError(f"chat/completion: {text}", retry=False)
 
 

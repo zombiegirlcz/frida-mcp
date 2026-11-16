@@ -78,6 +78,10 @@ def run_once(**kw) -> dict:
 
 
 # ------------------------------------------------------------------ zaklad
+# Vymazeme env promenne, aby baseline testy pouzily DEFAULT_TEMPERATURE
+for k in ("SHIM_TEMPERATURE", "FRIDA_MCP_TEMPERATURE"):
+    os.environ.pop(k, None)
+
 body = run_once()
 check("1. temperature se posila VZDY (i kdyz klient nic neda)",
       "temperature" in body, f"body={sorted(body)}")
